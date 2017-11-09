@@ -1,0 +1,2 @@
+# Ignore directory generated from CMakeLists.txt
+cmake-*
