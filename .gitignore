@@ -1,2 +1,5 @@
 # Ignore directory generated from CMakeLists.txt
 cmake-*
+
+# Ignore CLion project directory
+.idea/
