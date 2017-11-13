@@ -14,6 +14,7 @@ Node::Node()
 
 Node::~Node()
 {
+    freeTableMem();
 }
 
 int Node::put(std::string key_str, void* data_ptr, int data_bytes)
@@ -45,13 +46,13 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     /* Store value in hash table */
     value_t value;
     /* Allocate memory then copy data to storage */
-    value.value_ptr = malloc(data_bytes);
+    value.value_ptr = malloc((size_t)data_bytes);
     value.value_size = data_bytes;
     if (value.value_ptr == nullptr){
         std::cout << "ERROR: Node::put failed to allocate " << value.value_size << " bytes of memory." << std::endl;
         return -1;
     }
-    memcpy(value.value_ptr, data_ptr, value.value_size);
+    memcpy(value.value_ptr, data_ptr, (size_t)value.value_size);
     /* Add/Update value in table */
     table[digest] = value;
 
@@ -104,7 +105,7 @@ int Node::computeDigest(std::string key_str, digest_t* digest)
     if (key_size > MAX_KEY_LEN){
         return -1;
     }
-    char *key = new char[key_size];
+    auto *key = new char[key_size];
     std::strcpy(key, key_str.c_str());
 
     /* Use hashing function on value to calculate digest */
@@ -115,6 +116,17 @@ int Node::computeDigest(std::string key_str, digest_t* digest)
 #endif
 
     return 0;
+}
+
+void Node::freeTableMem()
+{
+    std::map<digest_t, value_t>::iterator it;
+    value_t tempVal;
+
+    for(it = table.begin(); it != table.end(); it++){
+        tempVal = it->second;
+        free(tempVal.value_ptr);
+    }
 }
 
 /************** Helper function definitions ***************/

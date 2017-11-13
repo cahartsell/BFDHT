@@ -30,12 +30,14 @@ int main() {
     void* out_ptr;
     int out_size;
     node.get("TEST", &out_ptr, &out_size);
-    memcpy(&out_data, out_ptr, out_size);
+    memcpy(&out_data, out_ptr, (size_t)out_size);
 
     std::cout << "Retrieved data of size " << out_size << std::endl;
     std::cout << "\tdata value 1:  " << out_data.val1 << std::endl;
     std::cout << "\tdata value 2:  " << out_data.val2 << std::endl;
     std::cout << "\tdata value 3:  " << out_data.val3 << std::endl;
+
+    delete node;
 
     return 0;
 }

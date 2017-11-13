@@ -13,8 +13,7 @@
 
 /* SHA generated digest type */
 typedef struct digest_t{
-    /* "byte" type is actually unsigned char */
-    byte bytes[CryptoPP::SHA256::DIGESTSIZE];
+    byte bytes[CryptoPP::SHA256::DIGESTSIZE]; /* "byte" type is actually unsigned char */
 
     /* digest_t used as key for map. Must define < operator */
     /* Unsigned chars are (apparently) auto converted to signed int for comparison */
@@ -30,8 +29,9 @@ typedef struct digest_t{
 
 /* Data type for elements stored in the Hash Table */
 typedef struct value_t{
-    void* value_ptr;  /* Pointer to start of value data */
-    int value_size; /* Size of data stored at value_ptr in bytes */
+    value_t() : value_ptr(nullptr), value_size(0) {}    /* Constructor & default values */
+    void* value_ptr;                                    /* Pointer to start of value data */
+    int value_size;                                     /* Size of data stored at value_ptr in bytes */
 } value_t;
 
 class Node
@@ -49,6 +49,7 @@ public:
 private:
     /* Private Functions */
     int computeDigest(std::string key_str, digest_t* digest);
+    void freeTableMem();
 
     /* Private Variables */
     CryptoPP::SHA256 hash;
