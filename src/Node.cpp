@@ -57,7 +57,7 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     }
     memcpy(value.value_ptr, data_ptr, (size_t)value.value_size);
     /* Add/Update value in table */
-    table[digest] = value;
+    this->table[digest] = value;
 
     return 0;
 }
@@ -82,7 +82,7 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     }
 
     /* Retrieve stored value and place into outputs */
-    out_value = table[digest];
+    out_value = this->table[digest];
     if (out_value.value_size == 0){
         std::cout << "ERROR: Node::get table lookup returned empty data value." << std::endl;
         return -1;
@@ -112,7 +112,7 @@ int Node::computeDigest(std::string key_str, digest_t* digest)
     std::strcpy(key, key_str.c_str());
 
     /* Use hashing function on value to calculate digest */
-    hash.CalculateDigest(digest->bytes, (byte*)key, key_size);
+    this->hash.CalculateDigest(digest->bytes, (byte*)key, key_size);
 
 #ifdef NODE_DEBUG
     print_digest(digest);
@@ -126,7 +126,7 @@ void Node::freeTableMem()
     std::map<digest_t, value_t>::iterator it;
     value_t tempVal;
 
-    for(it = table.begin(); it != table.end(); it++){
+    for(it = this->table.begin(); it != this->table.end(); it++){
         tempVal = it->second;
         free(tempVal.value_ptr);
     }
