@@ -10,6 +10,9 @@ void print_digest(digest_t digest);
 
 Node::Node()
 {
+    /*Create Node ID*/
+
+    update finger table
 }
 
 Node::~Node()

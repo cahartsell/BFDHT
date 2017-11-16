@@ -51,9 +51,14 @@ private:
     int computeDigest(std::string key_str, digest_t* digest);
     void freeTableMem();
 
+
+
     /* Private Variables */
     CryptoPP::SHA256 hash;
     std::map<digest_t, value_t> table;
+
+    /*finger table*/
+
 };
 
 
