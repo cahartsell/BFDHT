@@ -133,7 +133,8 @@ void Node::freeTableMem()
 }
 
 /************** Helper function definitions ***************/
-void print_digest(digest_t digest){
+void print_digest(digest_t digest)
+{
     int i;
 
     std::cout << std::endl;
