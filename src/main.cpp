@@ -41,7 +41,8 @@ int main() {
 
     delete &node;
 
-    auto myChord = new Chord::Chord();
+    Chord myChord;
+    //auto myChord = new Chord::Chord();
 
     return 0;
 }

@@ -14,15 +14,15 @@ Written by Tim Krentz, 11/15/2017
 #include <iostream>
 #include <types.h>
 
-    Chord::Chord()
-    {
+Chord::Chord()
+{
 
-    }
+}
 
-    Chord::~Chord()
-    {
+Chord::~Chord()
+{
 
-    }
+}
 
 int Chord::getNodeID(digest_t* chordId)
 {
