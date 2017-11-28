@@ -1,7 +1,7 @@
 #include <iostream>
 #include <cstring>
 #include <Chord.h>
-#include "../include/Node.h"
+#include <Node.h>
 
 typedef struct test_data_t{
     int val1;
@@ -10,7 +10,7 @@ typedef struct test_data_t{
 } test_data_t;
 
 int main() {
-    Node node;
+    auto node = new Node();
     test_data_t test_data;
     char* data_ptr;
     int data_size;
@@ -26,12 +26,12 @@ int main() {
     data_ptr = (char*)&test_data;
     data_size = sizeof(test_data);
 
-    node.put("TEST", data_ptr, data_size);
+    node->put("TEST", data_ptr, data_size);
 
     test_data_t out_data;
     void* out_ptr;
     int out_size;
-    node.get("TEST", &out_ptr, &out_size);
+    node->get("TEST", &out_ptr, &out_size);
     memcpy(&out_data, out_ptr, (size_t)out_size);
 
     std::cout << "Retrieved data of size " << out_size << std::endl;
@@ -39,9 +39,12 @@ int main() {
     std::cout << "\tdata value 2:  " << out_data.val2 << std::endl;
     std::cout << "\tdata value 3:  " << out_data.val3 << std::endl;
 
-    delete &node;
 
-    auto myChord = new Chord::Chord();
+    delete node;
+
+    auto myChord = new Chord();
+    digest_t myId;
+    myChord->getNodeID(&myId);
 
     return 0;
 }

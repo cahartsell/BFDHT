@@ -6,6 +6,7 @@
 #define BFDHT_CHORD_H
 
 #include <crypto++/sha.h>
+#include <types.h>
 
 
 class Chord
