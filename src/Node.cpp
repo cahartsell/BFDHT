@@ -3,6 +3,7 @@
 //
 
 #include <iostream>
+#include <cstring>
 #include "Node.h"
 
 /* Local helper functions */
@@ -12,7 +13,7 @@ Node::Node()
 {
     /*Create Node ID*/
 
-    update finger table
+    //update finger table
 }
 
 Node::~Node()
