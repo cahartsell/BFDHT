@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cstring>
-#include "Node.h"
+#include <Chord.h>
+#include "../include/Node.h"
 
 typedef struct test_data_t{
     int val1;
@@ -39,6 +40,8 @@ int main() {
     std::cout << "\tdata value 3:  " << out_data.val3 << std::endl;
 
     delete &node;
+
+    auto myChord = new Chord::Chord();
 
     return 0;
 }

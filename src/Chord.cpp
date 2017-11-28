@@ -10,12 +10,21 @@ Written by Tim Krentz, 11/15/2017
 #include <unistd.h>
 #include <netinet/in.h>
 #include <string.h>
+#include <Chord.h>
+#include <iostream>
+#include <types.h>
 
+    Chord::Chord()
+    {
 
-namespace Chord
-{
+    }
 
-int getNodeID(digest_t* chordId)
+    Chord::~Chord()
+    {
+
+    }
+
+int Chord::getNodeID(digest_t* chordId)
 {
     /*MAC address retrieved with code borrowed from
     https://stackoverflow.com/questions/1779715/how-to-get-mac-address-of-your-machine-using-a-c-program
@@ -26,11 +35,11 @@ int getNodeID(digest_t* chordId)
     int success = 0;
 
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-    if (sock == -1) {perror("ERROR (sock == -1) getNodeID")};
+    if(sock == -1) perror("ERROR (sock == -1) getNodeID");
 
     ifc.ifc_len = sizeof(buf);
     ifc.ifc_buf = buf;
-    if (ioctl(sock, SIOCGIFCONF, &ifc) == -1) {perror("ERROR (ioctl(sock, SIOCGIFCONF, &ifc) == -1) getNodeID")};
+    if (ioctl(sock, SIOCGIFCONF, &ifc) == -1) perror("ERROR (ioctl(sock, SIOCGIFCONF, &ifc) == -1) getNodeID");
 
     struct ifreq* it = ifc.ifc_req;
     const struct ifreq* const end = it + (ifc.ifc_len / sizeof(struct ifreq));
@@ -45,7 +54,7 @@ int getNodeID(digest_t* chordId)
                 }
             }
         }
-        else {perror("ERROR (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) getNodeID")};
+        else perror("ERROR (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) getNodeID");
     }
 
     unsigned char mac_address[6];
@@ -56,10 +65,10 @@ int getNodeID(digest_t* chordId)
         for(int i = 0; i < 6; i++){
             std::cout << std::hex << (int)mac_address[i];
         }
-        std::cout << "\n"
+        std::cout << "\n";
 
         /*Hash MAC to get Chord ID*/
-        CryptoPP::SHA256::Transform(chordId,mac_address);//need to find out how to use HashWordType
+        //CryptoPP::SHA256::Transform(chordId,mac_address);//need to find out how to use HashWordType
 
         return 0;
 
@@ -70,4 +79,3 @@ int getNodeID(digest_t* chordId)
 
 }
 
-}/* end namespace Chord*/
