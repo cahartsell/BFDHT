@@ -67,7 +67,7 @@ int Chord::getNodeID(digest_t* chordId)
         std::cout << "\n";
 
         /*Hash MAC to get Chord ID*/
-        //CryptoPP::SHA256::Transform(chordId,mac_address);//need to find out how to use HashWordType
+        this->hasher.CalculateDigest(chordId->bytes, (byte*)mac_address, 6);
 
         return 0;
 
