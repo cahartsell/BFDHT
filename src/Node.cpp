@@ -4,6 +4,8 @@
 
 #include <iostream>
 #include <cstring>
+#include <zmq.hpp>
+
 #include "Node.h"
 
 /* Local helper functions */
@@ -11,6 +13,9 @@ void print_digest(digest_t digest);
 
 Node::Node()
 {
+    /* Prepare ZMQ Context */
+    zmq_context = new zmq::context_t();
+
     /*Create Node ID*/
 
     //update finger table
