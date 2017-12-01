@@ -4,7 +4,7 @@
 
 #include <iostream>
 #include <cstring>
-#include "../include/Node.h"
+#include "Node.h"
 
 /* Local helper functions */
 void print_digest(digest_t digest);

@@ -12,7 +12,6 @@ Written by Tim Krentz, 11/15/2017
 #include <string.h>
 #include <Chord.h>
 #include <iostream>
-#include <types.h>
 
 Chord::Chord()
 {
