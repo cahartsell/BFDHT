@@ -23,6 +23,9 @@ Node::Node()
 
 Node::~Node()
 {
+    /* ZMQ Context class destructor calls zmq_ctx_destroy */
+    delete zmq_context;
+
     freeTableMem();
 }
 
