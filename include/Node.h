@@ -10,6 +10,7 @@
 #define MAX_DATA_SIZE 1024     // 1 kB max data size
 
 #include <types.h>
+#include <zmq.hpp>
 
 
 /* Data type for elements stored in the Hash Table */
@@ -41,6 +42,7 @@ private:
     /* Private Variables */
     CryptoPP::SHA256 hash;
     std::map<digest_t, value_t> table;
+    zmq::context_t* zmq_context;
 
     /*finger table*/
 

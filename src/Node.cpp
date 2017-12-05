@@ -3,13 +3,19 @@
 //
 
 #include <iostream>
-#include <Node.h>
+#include <cstring>
+#include <zmq.hpp>
+
+#include "Node.h"
 
 /* Local helper functions */
 void print_digest(digest_t digest);
 
 Node::Node()
 {
+    /* Prepare ZMQ Context */
+    zmq_context = new zmq::context_t();
+
     /*Create Node ID*/
 
     //update finger table
@@ -17,6 +23,9 @@ Node::Node()
 
 Node::~Node()
 {
+    /* ZMQ Context class destructor calls zmq_ctx_destroy */
+    delete zmq_context;
+
     freeTableMem();
 }
 
