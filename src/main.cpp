@@ -43,8 +43,24 @@ int main() {
     delete node;
 
     auto myChord = new Chord();
-    digest_t myId;
-    myChord->getNodeID(&myId);
+//    std::cout << "Size of INT on machine: " << sizeof(char) << std::endl;
+////    std::cout << "Size of ID: " << sizeof(myId.bytes) << std::endl;
+//    for (int i = 0; i < 20; i++) {
+//        std::cout << ("%x",(char)myId.bytes[i]);
+//    }
+//    std::cout << std::endl;
+    myChord->getNodeID();
+    myChord->getNodeIP();
+//    std::cout << "Size of ID: " << sizeof(myId.bytes) << std::endl;
+//    for (int i = 0; i < 20;i++) {
+//        std::cout << std::hex << (char)myId.bytes[i];
+//    }
+//    std::cout << std::endl;
+    std::cout << "Ideal size of 256 hash: " << std::dec << CryptoPP::SHA256::DIGESTSIZE << std::endl;
 
     return 0;
 }
+
+
+
+

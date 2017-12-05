@@ -8,15 +8,22 @@
 #include <crypto++/sha.h>
 #include <types.h>
 
-
+#define FINGER_TABLE_SIZE 5
+#define NETWORK_INTERFACE "enp0s8"
 class Chord
 {
 public:
     Chord();
     ~Chord();
-    int getNodeID(digest_t* chordId);
+    int getNodeID();
+    int getNodeIP();
+    void join(chord_t* bootstrap);
 private:
     CryptoPP::SHA256 hasher;
+    digest_t myId;
+    chord_t finger[FINGER_TABLE_SIZE];
+    chord_t predecessor;
+    chord_t myIp;
 };
 
 #endif //BFDHT_CHORD_H
