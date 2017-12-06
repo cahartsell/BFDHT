@@ -8,4 +8,4 @@ include_directories(include)
 set(SOURCE_FILES src/main.cpp src/Node.cpp src/Chord.cpp)
 add_executable(BFDHT ${SOURCE_FILES})
 
-target_link_libraries(BFDHT crypto++ zmq)
+target_link_libraries(BFDHT crypto++ zmq pthread)

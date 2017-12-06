@@ -6,6 +6,7 @@
 #include <cstring>
 #include <zmq.hpp>
 
+#include "Chord.h"
 #include "Node.h"
 
 /* Local helper functions */
@@ -13,10 +14,28 @@ void print_digest(digest_t digest);
 
 Node::Node()
 {
-    /* Prepare ZMQ Context */
-    zmq_context = new zmq::context_t();
+    /* Prepare ZMQ Context and main sockets */
+    zmqContext = new zmq::context_t();
+    subSock = new zmq::socket_t(*zmqContext, ZMQ_SUB);
+    pubSock = new zmq::socket_t(*zmqContext, ZMQ_PUB);
 
-    /*Create Node ID*/
+    /* Connect sockets to multicast address */
+    std::string temp = "epgm://";
+    temp += MULTICAST_IP;
+    temp += ':';
+    temp += PORT;
+    std::cout << "Node connecting to: " << temp.c_str() << std::endl;
+    subSock->connect(temp.c_str());
+    pubSock->bind(temp.c_str());
+
+    /* Set subscribed messages - All messages directed to this node */
+    /* This will need to be based on chord. All nodes subscribed to DEFAULT_TOPIC */
+    subSock->setsockopt(ZMQ_SUBSCRIBE, DEFAULT_TOPIC, strlen(DEFAULT_TOPIC));
+
+    /* Init Chord and Create Node ID */
+    chord = new Chord();
+    //chord->getNodeID();
+    //chord->getNodeIP();
 
     //update finger table
 }
@@ -24,9 +43,43 @@ Node::Node()
 Node::~Node()
 {
     /* ZMQ Context class destructor calls zmq_ctx_destroy */
-    delete zmq_context;
+    delete zmqContext;
+    delete subSock;
 
     freeTableMem();
+}
+
+int Node::main()
+{
+    zmq::message_t msg;
+    char msgData[100];
+
+    std::cout << "Node main function called. Listening for messages" << std::endl;
+
+    /* FIXME: Infinite loop. How do we want to terminate? */
+    while(1) {
+        subSock->recv(&msg);
+        memcpy(msgData, msg.data(), msg.size());
+        msgData[msg.size()] = '\0';
+
+        /* High tech message handler */
+        std::cout << "Node received message. Contents: " << msgData << std::endl;
+    }
+
+    return 0;
+}
+
+int Node::send(std::string &msgStr)
+{
+    zmq::message_t msg(100);
+
+    snprintf((char*) msg.data(), 100, "%s %s", DEFAULT_TOPIC, msgStr.c_str());
+
+    std::cout << "Node sending message: " << (char*) msg.data() << std::endl;
+
+    pubSock->send(msg);
+
+    return 0;
 }
 
 int Node::put(std::string key_str, void* data_ptr, int data_bytes)

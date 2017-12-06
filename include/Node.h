@@ -9,8 +9,17 @@
 #define MAX_KEY_LEN 256         // 256 character key length
 #define MAX_DATA_SIZE 1024     // 1 kB max data size
 
-#include <types.h>
 #include <zmq.hpp>
+
+#include "types.h"
+#include "Chord.h"
+
+/* Hardcoded multicast IP Address. Some sort of ZMQ black magic is going on here */
+#define MULTICAST_IP "239.192.1.1"
+#define PORT "8476"
+
+/* Hardcoded message topic until more appropriate topics available */
+#define DEFAULT_TOPIC "TOPIC_0"
 
 
 /* Data type for elements stored in the Hash Table */
@@ -26,8 +35,11 @@ public:
     /* Public Functions */
     Node();
     ~Node();
+    int main();
     int put(std::string key_str, void* data_ptr, int data_bytes);
     int get(std::string key_str, void** data_ptr, int* data_bytes);
+
+    int send(std::string &msgStr);
 
     /* Public Variables */
 
@@ -37,12 +49,12 @@ private:
     int computeDigest(std::string key_str, digest_t* digest);
     void freeTableMem();
 
-
-
     /* Private Variables */
     CryptoPP::SHA256 hash;
     std::map<digest_t, value_t> table;
-    zmq::context_t* zmq_context;
+    Chord* chord;
+    zmq::context_t *zmqContext;
+    zmq::socket_t *subSock, *pubSock;
 
     /*finger table*/
 
