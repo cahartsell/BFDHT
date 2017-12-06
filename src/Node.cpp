@@ -14,13 +14,21 @@ void print_digest(digest_t digest);
 
 Node::Node()
 {
+    /* Init Chord and Create Node ID */
+    chord = new Chord();
+    //chord->getNodeID();
+    chord->getNodeIP();
+
     /* Prepare ZMQ Context and main sockets */
     zmqContext = new zmq::context_t();
     subSock = new zmq::socket_t(*zmqContext, ZMQ_SUB);
     pubSock = new zmq::socket_t(*zmqContext, ZMQ_PUB);
 
     /* Connect sockets to multicast address */
+    /* FIXME: Interface IP hardcoded because chord cannot discover IP of mininet nodes. */
     std::string temp = "epgm://";
+    temp += "10.0.0.1";
+    temp += ';';
     temp += MULTICAST_IP;
     temp += ':';
     temp += PORT;
@@ -29,13 +37,8 @@ Node::Node()
     pubSock->bind(temp.c_str());
 
     /* Set subscribed messages - All messages directed to this node */
-    /* This will need to be based on chord. All nodes subscribed to DEFAULT_TOPIC */
+    /* This will need to be based on IP. All nodes subscribed to DEFAULT_TOPIC */
     subSock->setsockopt(ZMQ_SUBSCRIBE, DEFAULT_TOPIC, strlen(DEFAULT_TOPIC));
-
-    /* Init Chord and Create Node ID */
-    chord = new Chord();
-    //chord->getNodeID();
-    //chord->getNodeIP();
 
     //update finger table
 }

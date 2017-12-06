@@ -26,6 +26,7 @@ int main() {
     //node->main();
 
     /* Start and run Node in separate thread */
+
     pthread_t nodeThread;
     pthread_create(&nodeThread, NULL, runNode, (void*) node);
 
@@ -36,6 +37,7 @@ int main() {
 
         node->send(userIn);
     }
+
 
     /********** Debugging code for testing local hash table functionality **********/
 //    auto node = new Node();
