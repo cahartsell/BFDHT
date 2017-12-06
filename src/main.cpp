@@ -1,6 +1,5 @@
 #include <iostream>
 #include <cstring>
-#include <pthread.h>
 
 #include "Chord.h"
 #include "Node.h"
@@ -12,23 +11,11 @@ typedef struct test_data_t{
     char val3[10];
 } test_data_t;
 
-/* Node thread function */
-void* runNode(void* arg)
-{
-    Node* node = (Node*) arg;
-    node->main();
-}
-
 int main() {
 
-    /* Start and run Node (within main thread) */
-    auto node = new Node();
-    //node->main();
-
     /* Start and run Node in separate thread */
-
-    pthread_t nodeThread;
-    pthread_create(&nodeThread, NULL, runNode, (void*) node);
+    auto node = new Node();
+    node->startup();
 
     while(1){
         std::cout << "Waiting for input: " << std::endl;

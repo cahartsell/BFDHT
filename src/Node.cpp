@@ -4,9 +4,7 @@
 
 #include <iostream>
 #include <cstring>
-#include <zmq.hpp>
 
-#include "Chord.h"
 #include "Node.h"
 
 /* Local helper functions */
@@ -47,9 +45,44 @@ Node::~Node()
 {
     /* ZMQ Context class destructor calls zmq_ctx_destroy */
     delete zmqContext;
-    delete subSock;
+    delete subSock, pubSock;
+    delete chord;
 
     freeTableMem();
+
+    /* FIXME: Cleanup threads here */
+}
+
+int Node::startup() {
+    /* FIXME: Need to confirm pthread_create success */
+    /* Spawn thread for Node::main() */
+    pthread_create(&mainThread, NULL, runNode, (void*) this);
+
+    /* Spawn worker thread pool */
+    int i;
+    worker_t temp_workers[INIT_WORKER_THREAD_CNT];
+    std::string tempAddr;
+    for(i = 0; i < INIT_WORKER_THREAD_CNT; i++){
+        /* Setup worker socket using IPC */
+        temp_workers[i].sock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
+        tempAddr = "ipc:///tmp/BFDHT/";
+        tempAddr += i;
+        temp_workers[i].sock->bind(tempAddr.c_str());
+
+        /* Spawn worker thread */
+        temp_workers[i].args.id = i;
+        temp_workers[i].args.node = this;
+        pthread_create(&(temp_workers[i].thread), NULL, runWorker, (void*) &(temp_workers[i].args));
+        workers.push_back(temp_workers[i]);
+    }
+
+    return 0;
+}
+
+void* Node::runNode(void* arg)
+{
+    Node* node = (Node*) arg;
+    node->main();
 }
 
 int Node::main()
@@ -72,6 +105,42 @@ int Node::main()
     return 0;
 }
 
+void* Node::runWorker(void* arg)
+{
+    worker_arg_t *args = (worker_arg_t*) arg;
+    Node *node = (Node*) args->node;
+    node->workerMain(args->id);
+}
+
+int Node::workerMain(int id)
+{
+    zmq::socket_t *sock;
+    std::string tempAddr;
+    zmq::message_t msg;
+    char msgData[100];
+
+    /* Connect socket to main thread */
+    sock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
+    tempAddr = "ipc:///tmp/BFDHT/";
+    tempAddr += id;
+    sock->connect(tempAddr.c_str());
+
+    std::cout << "Worker started with id " << id << ". Listening for messages" << std::endl;
+
+    /* FIXME: Infinite loop. How do we want to terminate? */
+    while(1) {
+        sock->recv(&msg);
+        memcpy(msgData, msg.data(), msg.size());
+        msgData[msg.size()] = '\0';
+
+        /* High tech message handler */
+        std::cout << "Worker received message. Contents: " << msgData << std::endl;
+    }
+
+    return 0;
+}
+
+/* FIXME: This is temporary for debugging. Need real version */
 int Node::send(std::string &msgStr)
 {
     zmq::message_t msg(100);
