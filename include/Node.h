@@ -8,18 +8,21 @@
 #include <zmq.hpp>
 #include <vector>
 #include <pthread.h>
+#include <string>
 
 #include "types.h"
 #include "Chord.h"
+#include "messages.h"
 
 //#define NODE_DEBUG
 #define MAX_KEY_LEN                 256     // 256 character key length
 #define MAX_DATA_SIZE               1024    // 1 kB max data size
 #define INIT_WORKER_THREAD_CNT      10
 
-/* Hardcoded multicast IP Address. Some sort of ZMQ black magic is going on here */
+/* Hardcoded multicast IP Address */
 #define MULTICAST_IP "239.192.1.1"
 #define PORT "8476"
+#define IPC_PATH "/tmp/BFDHT"
 
 /* Hardcoded message topic until more appropriate topics available */
 #define DEFAULT_TOPIC "TOPIC_0"
@@ -34,16 +37,18 @@ typedef struct value_t{
 
 /* Data type passed to worker thread */
 typedef struct worker_arg_t{
+    worker_arg_t() : node(nullptr), id(0) {}
     void *node;
     int id;
 } worker_arg_t;
 
 /* Data type for maintaining worker threads */
 typedef struct worker_t{
-    worker_t() : thread(0), sock(0) {}  /* Constructor */
+    worker_t() : thread(0), sock(0), busy(0) {}  /* Constructor */
     pthread_t thread;
     zmq::socket_t *sock;
     worker_arg_t args;
+    int busy;
 } worker_t;
 
 class Node
@@ -67,8 +72,11 @@ private:
     static void* runNode(void*);
     int workerMain(int id);
     static void* runWorker(void*);
+    int findReadyWorker(worker_t** worker);
     int computeDigest(std::string key_str, digest_t* digest);
     void freeTableMem();
+    int localPut(digest_t digest, void* data_ptr, int data_bytes);
+    int localGet(digest_t digest, void** data_ptr, int* data_bytes);
 
     /* Private Variables */
     CryptoPP::SHA256 hash;

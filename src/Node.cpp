@@ -65,13 +65,15 @@ int Node::startup() {
     for(i = 0; i < INIT_WORKER_THREAD_CNT; i++){
         /* Setup worker socket using IPC */
         temp_workers[i].sock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
-        tempAddr = "ipc:///tmp/BFDHT/";
+        tempAddr = "ipc://";
+        tempAddr += IPC_PATH;
         tempAddr += i;
         temp_workers[i].sock->bind(tempAddr.c_str());
 
         /* Spawn worker thread */
         temp_workers[i].args.id = i;
         temp_workers[i].args.node = this;
+        temp_workers[i].busy = false;
         pthread_create(&(temp_workers[i].thread), NULL, runWorker, (void*) &(temp_workers[i].args));
         workers.push_back(temp_workers[i]);
     }
@@ -88,18 +90,27 @@ void* Node::runNode(void* arg)
 int Node::main()
 {
     zmq::message_t msg;
-    char msgData[100];
+    msg_header_t msgHeader;
+    char msgTopic[MSG_TOPIC_SIZE + 1];
+    char *data;
+    worker_t* tempWorker;
 
     std::cout << "Node main function called. Listening for messages" << std::endl;
 
     /* FIXME: Infinite loop. How do we want to terminate? */
     while(1) {
         subSock->recv(&msg);
-        memcpy(msgData, msg.data(), msg.size());
-        msgData[msg.size()] = '\0';
+        memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
 
         /* High tech message handler */
-        std::cout << "Node received message. Contents: " << msgData << std::endl;
+        memcpy(msgTopic, msgHeader.msgTopic, MSG_TOPIC_SIZE);
+        msgTopic[MSG_TOPIC_SIZE] = '\0';
+        std::cout << "Node received message. Type: " << msgHeader.msgType;
+        std::cout << "\t Topic: " << msgHeader.msgTopic << std::endl;
+
+        /* FIXME: Can't assume worker will always be available */
+        findReadyWorker(&tempWorker);
+        /* TODO: Dispatch message to tempWorker here */
     }
 
     return 0;
@@ -117,27 +128,112 @@ int Node::workerMain(int id)
     zmq::socket_t *sock;
     std::string tempAddr;
     zmq::message_t msg;
-    char msgData[100];
+    worker_msg_header_t msgHeader;
 
     /* Connect socket to main thread */
     sock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
-    tempAddr = "ipc:///tmp/BFDHT/";
+    tempAddr = "ipc://";
+    tempAddr += IPC_PATH;
     tempAddr += id;
     sock->connect(tempAddr.c_str());
 
     std::cout << "Worker started with id " << id << ". Listening for messages" << std::endl;
 
-    /* FIXME: Infinite loop. How do we want to terminate? */
-    while(1) {
+    int running = true;
+    while(running) {
         sock->recv(&msg);
-        memcpy(msgData, msg.data(), msg.size());
-        msgData[msg.size()] = '\0';
+        memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+        std::cout << "Worker received message. Type: " << msgHeader.msgType << std::endl;
 
-        /* High tech message handler */
-        std::cout << "Worker received message. Contents: " << msgData << std::endl;
+        /* NOTE: some of the case statements are given their own scope {}
+         *       this is to allow different message type variables to be declared
+         *       depending on the type of message received */
+        switch (msgHeader.msgType) {
+
+            case MSG_TYPE_THREAD_SHUTDOWN:
+                running = false;
+                /* FIXME: Do any cleanup here */
+                break;
+
+            case MSG_TYPE_PUT_DATA: {
+                if (msg.size() < WORKER_PUT_DATA_MSG_SIZE) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+
+                worker_put_msg_t *putMsg = (worker_put_msg_t *) malloc(msg.size());
+                if (putMsg == nullptr) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+                memcpy(putMsg, msg.data(), msg.size());
+
+                int dataSize = msg.size() - sizeof(worker_put_msg_t);
+                localPut(putMsg->digest, putMsg->data, dataSize);
+
+                /* localPut blocks until message is stored in hash table. */
+                /* Safe to free memory at this point */
+                free(putMsg);
+                break;
+            }
+
+            /* FIXME: Shouldn't get message always be fixed size? */
+            case MSG_TYPE_GET_DATA: {
+                if (msg.size() < WORKER_GET_DATA_MSG_SIZE) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+
+                worker_get_msg_t *getMsg = (worker_get_msg_t *) malloc(msg.size());
+                if (getMsg == nullptr) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+                memcpy(getMsg, msg.data(), msg.size());
+
+                int dataSize;
+                void* data;
+                localGet(getMsg->digest, &data, &dataSize);
+
+                /* FIXME: Send data back to client here */
+
+                /* localGet blocks until message is retrieved from hash table. */
+                /* Safe to free memory at this point */
+                free(getMsg);
+                break;
+            }
+
+            default:
+                /* FIXME: Unrecognized message error */
+                break;
+        }
     }
 
     return 0;
+}
+
+/* Searches the workers vector (private member of Node) to find a non-busy worker thread
+ * Sets argument pointer to first available worker
+ * Returns 0 on success or -1 otherwise */
+int Node::findReadyWorker(worker_t** in_worker)
+{
+    /* Input check */
+    if (in_worker == nullptr){
+        return -1;
+    }
+
+    std::vector<worker_t>::iterator it;
+    worker_t* tempWorker;
+    for(it = workers.begin(); it != workers.end(); it++){
+        tempWorker = it.base();
+        if (tempWorker->busy == false){
+            *in_worker = tempWorker;
+            return 0;
+        }
+    }
+
+    /* All workers busy */
+    return -1;
 }
 
 /* FIXME: This is temporary for debugging. Need real version */
@@ -156,9 +252,41 @@ int Node::send(std::string &msgStr)
 
 int Node::put(std::string key_str, void* data_ptr, int data_bytes)
 {
+    /* Find who to route this request too. Currently assumes all requests are local */
     digest_t digest;
     int result;
+    /* Get hash digest of key string */
+    result = computeDigest(key_str, &digest);
+    if (result != 0) {
+        std::cout << "ERROR: Node::put failed to generate hash digest from key: " << key_str << std::endl;
+        return -1;
+    }
 
+    localPut(digest, data_ptr, data_bytes);
+
+    return 0;
+}
+
+int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
+{
+    /* Find who to route this request too. Currently assumes all requests are local */
+    digest_t digest;
+    int result;
+    /* Get hash digest of key string */
+    result = computeDigest(key_str, &digest);
+    if (result != 0) {
+        std::cout << "ERROR: Node::put failed to generate hash digest from key: " << key_str << std::endl;
+        return -1;
+    }
+
+    localGet(digest, data_ptr, data_bytes);
+
+    return 0;
+}
+
+/* FIXME: Likely need mutex for localPut and localGet */
+int Node::localPut(digest_t digest, void* data_ptr, int data_bytes)
+{
     /* Input checks */
     if (data_ptr == nullptr){
         std::cout << "ERROR: Node::put received NULL data pointer." << std::endl;
@@ -170,13 +298,6 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     }
     if (data_bytes > MAX_DATA_SIZE){
         std::cout << "ERROR: Node::put received data over maximum size. Bytes: " << data_bytes << std::endl;
-        return -1;
-    }
-
-    /* Get hash digest of key string */
-    result = computeDigest(key_str, &digest);
-    if (result != 0) {
-        std::cout << "ERROR: Node::put failed to generate hash digest from key: " << key_str << std::endl;
         return -1;
     }
 
@@ -196,22 +317,13 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     return 0;
 }
 
-int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
+int Node::localGet(digest_t digest, void** data_ptr, int* data_bytes)
 {
-    digest_t digest;
-    int result;
     value_t out_value;
 
     /* Check input */
-    if (data_bytes == nullptr || data_ptr == nullptr){
-        std::cout << "ERROR: Node::get received NULL output value pointer." << std::endl;
-        return -1;
-    }
-
-    /* Generate hash digest from key string */
-    result = computeDigest(key_str, &digest);
-    if (result != 0){
-        std::cout << "ERROR: Node::get failed to generate hash digest from key: " << key_str << std::endl;
+    if (data_bytes == nullptr){
+        std::cout << "ERROR: Node::get received NULL output size pointer." << std::endl;
         return -1;
     }
 
