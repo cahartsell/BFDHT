@@ -25,7 +25,7 @@ Node::Node()
     /* Connect sockets to multicast address */
     /* FIXME: Interface IP hardcoded because chord cannot discover IP of mininet nodes. */
     std::string temp = "epgm://";
-    temp += "10.0.0.2";
+    temp += chord->getIP();
     temp += ';';
     temp += MULTICAST_IP;
     temp += ':';

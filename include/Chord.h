@@ -9,7 +9,7 @@
 #include <types.h>
 
 #define FINGER_TABLE_SIZE 5
-#define NETWORK_INTERFACE "enp0s8"
+#define NETWORK_INTERFACE "eth0"
 class Chord
 {
 public:
@@ -17,6 +17,7 @@ public:
     ~Chord();
     int getNodeID();
     int getNodeIP();
+    std::string getIP();
     void join(chord_t* bootstrap);
 private:
     CryptoPP::SHA256 hasher;

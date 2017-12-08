@@ -120,6 +120,11 @@ int Chord::getNodeIP()
     return success;
 }
 
+std::string Chord::getIP()
+{
+    return myIp.ip;
+}
+
 void Chord::join(chord_t* bootstrap = nullptr)
 {
     /* if i am the bootstrap, do nothing
