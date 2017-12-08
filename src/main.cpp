@@ -17,12 +17,41 @@ int main() {
     auto node = new Node();
     node->startup();
 
-    while(1){
-        std::cout << "Waiting for input: " << std::endl;
-        std::string userIn;
-        std::cin >> userIn;
+    std::string userIn, key, valStr;
+    int value;
+    size_t data_size;
+    worker_get_msg_t *getMsg;
+    worker_put_msg_t *putMsg;
+    digest_t digest;
 
-        node->send(userIn);
+    while(1){
+        std::cout << "Waiting for command: " << std::endl;
+        std::cin >> userIn;
+        //std::cout << "Got input: " << userIn << std::endl;
+
+        if(userIn.compare("get") == 0){
+            std::cout << "Waiting for key: " << std::endl;
+            std::cin >> key;
+            node->computeDigest(key, &digest);
+            getMsg = (worker_get_msg_t*)malloc(sizeof(worker_get_msg_t));
+            getMsg->msgType = MSG_TYPE_GET_DATA_REQ;
+            getMsg->digest = digest;
+            std::cout << "Sending get message with size: " << sizeof(worker_get_msg_t) << std::endl;
+            node->send(DEFAULT_TOPIC, (char*)getMsg, sizeof(worker_get_msg_t));
+        }
+        else if(userIn.compare("put") == 0) {
+            std::cout << "Waiting for key: " << std::endl;
+            std::cin >> key;
+            node->computeDigest(key, &digest);
+            std::cin >> valStr;
+            value = std::stoi(valStr);
+            putMsg = (worker_put_msg_t*)malloc(sizeof(worker_put_msg_t) + sizeof(value));
+            putMsg->msgType = MSG_TYPE_PUT_DATA_REQ;
+            putMsg->digest = digest;
+            *((int*)putMsg->data) = 10;
+            std::cout << "Sending put message with size: " << sizeof(worker_put_msg_t) + sizeof(value) << std::endl;
+            node->send(DEFAULT_TOPIC, (char*)putMsg, sizeof(worker_put_msg_t) + sizeof(value));
+        }
     }
 
 

@@ -14,7 +14,9 @@
 #include "Chord.h"
 #include "messages.h"
 
-//#define NODE_DEBUG
+/********** DEBUGGING FLAG ON ***********/
+#define NODE_DEBUG
+
 #define MAX_KEY_LEN                 256     // 256 character key length
 #define MAX_DATA_SIZE               1024    // 1 kB max data size
 #define INIT_WORKER_THREAD_CNT      10
@@ -22,10 +24,14 @@
 /* Hardcoded multicast IP Address */
 #define MULTICAST_IP "239.192.1.1"
 #define PORT "8476"
-#define IPC_PATH "/tmp/BFDHT"
+
+/* Path for IPC communication.
+ * '@' symbol makes this an unnamed socket path (doesn't exist on disk)
+ * Don't have to worry about socket cleanup or already exists conflicts */
+#define IPC_PATH "@/tmp/BFDHT/"
 
 /* Hardcoded message topic until more appropriate topics available */
-#define DEFAULT_TOPIC "TOPIC_0"
+#define DEFAULT_TOPIC "ABCD"
 
 
 /* Data type for elements stored in the Hash Table */
@@ -47,7 +53,6 @@ typedef struct worker_t{
     worker_t() : thread(0), sock(0), busy(0) {}  /* Constructor */
     pthread_t thread;
     zmq::socket_t *sock;
-    worker_arg_t args;
     int busy;
 } worker_t;
 
@@ -58,22 +63,22 @@ public:
     Node();
     ~Node();
     int startup();
+    int shutdown();
     int put(std::string key_str, void* data_ptr, int data_bytes);
     int get(std::string key_str, void** data_ptr, int* data_bytes);
 
-    int send(std::string &msgStr);
+    int send(std::string topic, void* data_ptr, size_t data_size);
+    int computeDigest(std::string key_str, digest_t* digest);
 
     /* Public Variables */
 
 
 private:
     /* Private Functions */
-    int main();
-    static void* runNode(void*);
-    int workerMain(int id);
-    static void* runWorker(void*);
+    static void* main(void* arg);
+    static void* workerMain(void* arg);
     int findReadyWorker(worker_t** worker);
-    int computeDigest(std::string key_str, digest_t* digest);
+    //int computeDigest(std::string key_str, digest_t* digest);
     void freeTableMem();
     int localPut(digest_t digest, void* data_ptr, int data_bytes);
     int localGet(digest_t digest, void** data_ptr, int* data_bytes);

@@ -25,7 +25,7 @@ Node::Node()
     /* Connect sockets to multicast address */
     /* FIXME: Interface IP hardcoded because chord cannot discover IP of mininet nodes. */
     std::string temp = "epgm://";
-    temp += "10.0.0.1";
+    temp += "10.0.0.2";
     temp += ';';
     temp += MULTICAST_IP;
     temp += ':';
@@ -50,100 +50,142 @@ Node::~Node()
 
     freeTableMem();
 
-    /* FIXME: Cleanup threads here */
+    /* TODO: Cleanup threads here */
 }
 
 int Node::startup() {
     /* FIXME: Need to confirm pthread_create success */
     /* Spawn thread for Node::main() */
-    pthread_create(&mainThread, NULL, runNode, (void*) this);
+    pthread_create(&mainThread, NULL, main, (void*) this);
 
     /* Spawn worker thread pool */
     int i;
-    worker_t temp_workers[INIT_WORKER_THREAD_CNT];
+    worker_t temp_worker;
+    worker_arg_t* temp_args;
     std::string tempAddr;
     for(i = 0; i < INIT_WORKER_THREAD_CNT; i++){
         /* Setup worker socket using IPC */
-        temp_workers[i].sock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
+        temp_worker.sock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
         tempAddr = "ipc://";
         tempAddr += IPC_PATH;
-        tempAddr += i;
-        temp_workers[i].sock->bind(tempAddr.c_str());
+        tempAddr += std::to_string(i);
+        temp_worker.sock->bind(tempAddr.c_str());
 
         /* Spawn worker thread */
-        temp_workers[i].args.id = i;
-        temp_workers[i].args.node = this;
-        temp_workers[i].busy = false;
-        pthread_create(&(temp_workers[i].thread), NULL, runWorker, (void*) &(temp_workers[i].args));
-        workers.push_back(temp_workers[i]);
+        temp_args = static_cast<worker_arg_t*>( malloc(sizeof(worker_arg_t)) );
+        temp_args->id = i;
+        temp_args->node = this;
+        temp_worker.busy = false;
+        workers.push_back(temp_worker);
+        /* FIXME: Need to confirm pthread_create success */
+        pthread_create(&(workers[i].thread), NULL, workerMain, (void*) temp_args);
     }
 
     return 0;
 }
 
-void* Node::runNode(void* arg)
+int Node::shutdown()
 {
-    Node* node = (Node*) arg;
-    node->main();
+    /* TODO: Write this function */
+    return 0;
 }
 
-int Node::main()
+void* Node::main(void* arg)
 {
-    zmq::message_t msg;
+    Node* context = static_cast<Node*>(arg);
+
+    zmq::message_t recvMsg;
     msg_header_t msgHeader;
     char msgTopic[MSG_TOPIC_SIZE + 1];
-    char *data;
+    char *data, *cpyStart, *cpyEnd, *msgStart;
     worker_t* tempWorker;
+    size_t workerMsgSize;
+    int result, running;
 
+#ifdef NODE_DEBUG
     std::cout << "Node main function called. Listening for messages" << std::endl;
+#endif
 
-    /* FIXME: Infinite loop. How do we want to terminate? */
-    while(1) {
-        subSock->recv(&msg);
-        memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+    running = true;
+    while(running) {
+        context->subSock->recv(&recvMsg);
+        memcpy(&msgHeader, recvMsg.data(), sizeof(msgHeader));
 
         /* High tech message handler */
         memcpy(msgTopic, msgHeader.msgTopic, MSG_TOPIC_SIZE);
         msgTopic[MSG_TOPIC_SIZE] = '\0';
-        std::cout << "Node received message. Type: " << msgHeader.msgType;
-        std::cout << "\t Topic: " << msgHeader.msgTopic << std::endl;
 
+#ifdef NODE_DEBUG
+        std::cout << "Node received message. Type: " << msgHeader.msgType;
+        std::cout << "\t Topic: " << msgHeader.msgTopic  << "\tSize: " << recvMsg.size() << std::endl;
+#endif
+
+        if (msgHeader.msgType == MSG_TYPE_THREAD_SHUTDOWN){
+            /* TODO: Shutdown threads here */
+            running = false;
+        }
+
+        /* Strip topic from message */
+        workerMsgSize = recvMsg.size() - MSG_TOPIC_SIZE;
+        zmq::message_t sendMsg(workerMsgSize);
+        /* FIXME: Need checks on memory sizes before copying */
+        cpyStart = static_cast<char*>(recvMsg.data()) + MSG_TOPIC_SIZE;
+        cpyEnd = static_cast<char*>(recvMsg.data()) + recvMsg.size();
+        msgStart = static_cast<char*>(sendMsg.data());
+        std::copy(cpyStart, cpyEnd, msgStart);
+
+        /* Dispatch message to worker */
         /* FIXME: Can't assume worker will always be available */
-        findReadyWorker(&tempWorker);
-        /* TODO: Dispatch message to tempWorker here */
+        result = context->findReadyWorker(&tempWorker);
+        if(result == 0) {
+            tempWorker->sock->send(sendMsg);
+        }
+        else{
+#ifdef NODE_DEBUG
+            std::cout << "All worker threads busy." << std::endl;
+#endif
+            /* TODO: Handle no available worker */
+        }
     }
 
     return 0;
 }
 
-void* Node::runWorker(void* arg)
+void* Node::workerMain(void* arg)
 {
-    worker_arg_t *args = (worker_arg_t*) arg;
-    Node *node = (Node*) args->node;
-    node->workerMain(args->id);
-}
+    /* Copy arg data then free arg pointer */
+    worker_arg_t* args = static_cast<worker_arg_t*>(arg);
+    Node* context = static_cast<Node*>(args->node);
+    int id = args->id;
+    free(arg);
 
-int Node::workerMain(int id)
-{
     zmq::socket_t *sock;
     std::string tempAddr;
     zmq::message_t msg;
     worker_msg_header_t msgHeader;
 
     /* Connect socket to main thread */
-    sock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
+    sock = new zmq::socket_t(*(context->zmqContext), ZMQ_PAIR);
     tempAddr = "ipc://";
     tempAddr += IPC_PATH;
-    tempAddr += id;
+    tempAddr += std::to_string(id);
     sock->connect(tempAddr.c_str());
 
+#ifdef NODE_DEBUG
     std::cout << "Worker started with id " << id << ". Listening for messages" << std::endl;
+#endif
 
     int running = true;
     while(running) {
+#ifdef NODE_DEBUG
+        std::cout << "Worker listening for message." << std::endl;
+#endif
         sock->recv(&msg);
         memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+
+#ifdef NODE_DEBUG
         std::cout << "Worker received message. Type: " << msgHeader.msgType << std::endl;
+#endif
 
         /* NOTE: some of the case statements are given their own scope {}
          *       this is to allow different message type variables to be declared
@@ -151,12 +193,19 @@ int Node::workerMain(int id)
         switch (msgHeader.msgType) {
 
             case MSG_TYPE_THREAD_SHUTDOWN:
+#ifdef NODE_DEBUG
+                std::cout << "Worker shutting down" << std::endl;
+#endif
                 running = false;
                 /* FIXME: Do any cleanup here */
                 break;
 
-            case MSG_TYPE_PUT_DATA: {
-                if (msg.size() < WORKER_PUT_DATA_MSG_SIZE) {
+            case MSG_TYPE_PUT_DATA_REQ: {
+#ifdef NODE_DEBUG
+                std::cout << "Worker put request started. MSG Size: " << msg.size() << std::endl;
+                std::cout << "\t\t Struct Size: " << sizeof(worker_put_msg_t) << std::endl;
+#endif
+                if (msg.size() < sizeof(worker_put_msg_t)) {
                     /* FIXME: Handle error condition */
                     break;
                 }
@@ -168,8 +217,11 @@ int Node::workerMain(int id)
                 }
                 memcpy(putMsg, msg.data(), msg.size());
 
-                int dataSize = msg.size() - sizeof(worker_put_msg_t);
-                localPut(putMsg->digest, putMsg->data, dataSize);
+#ifdef NODE_DEBUG
+                std::cout << "Worker (" << id << ") putting value: " << *((int*)putMsg->data) << std::endl;
+#endif
+                size_t dataSize = msg.size() - sizeof(worker_put_msg_t);
+                context->localPut(putMsg->digest, putMsg->data, dataSize);
 
                 /* localPut blocks until message is stored in hash table. */
                 /* Safe to free memory at this point */
@@ -178,8 +230,12 @@ int Node::workerMain(int id)
             }
 
             /* FIXME: Shouldn't get message always be fixed size? */
-            case MSG_TYPE_GET_DATA: {
-                if (msg.size() < WORKER_GET_DATA_MSG_SIZE) {
+            case MSG_TYPE_GET_DATA_REQ: {
+#ifdef NODE_DEBUG
+                std::cout << "Worker get request started. MSG Size: " << msg.size() << std::endl;
+                std::cout << "\t\t Struct Size: " << sizeof(worker_get_msg_t) << std::endl;
+#endif
+                if (msg.size() < sizeof(worker_get_msg_t)) {
                     /* FIXME: Handle error condition */
                     break;
                 }
@@ -191,11 +247,16 @@ int Node::workerMain(int id)
                 }
                 memcpy(getMsg, msg.data(), msg.size());
 
+                /* localGet returns pointer to data in hash table and its size */
                 int dataSize;
-                void* data;
-                localGet(getMsg->digest, &data, &dataSize);
+                void *data;
+                context->localGet(getMsg->digest, &data, &dataSize);
 
-                /* FIXME: Send data back to client here */
+#ifdef NODE_DEBUG
+                std::cout << "Worker (" << id << ") got value: " << *((int*)data) << std::endl;
+#endif
+
+                /* TODO: Send data back to client here */
 
                 /* localGet blocks until message is retrieved from hash table. */
                 /* Safe to free memory at this point */
@@ -208,8 +269,6 @@ int Node::workerMain(int id)
                 break;
         }
     }
-
-    return 0;
 }
 
 /* Searches the workers vector (private member of Node) to find a non-busy worker thread
@@ -226,7 +285,7 @@ int Node::findReadyWorker(worker_t** in_worker)
     worker_t* tempWorker;
     for(it = workers.begin(); it != workers.end(); it++){
         tempWorker = it.base();
-        if (tempWorker->busy == false){
+        if (tempWorker->busy == 0){
             *in_worker = tempWorker;
             return 0;
         }
@@ -237,13 +296,31 @@ int Node::findReadyWorker(worker_t** in_worker)
 }
 
 /* FIXME: This is temporary for debugging. Need real version */
-int Node::send(std::string &msgStr)
+int Node::send(std::string topicStr, void* dataPtr, size_t dataSize)
 {
-    zmq::message_t msg(100);
+    /* Input checks */
+    if (topicStr.size() != MSG_TOPIC_SIZE) {
+        return -1;
+    }
+    if (dataPtr == nullptr){
+        return -1;
+    }
 
-    snprintf((char*) msg.data(), 100, "%s %s", DEFAULT_TOPIC, msgStr.c_str());
+    size_t msgSize = dataSize + MSG_TOPIC_SIZE;
+    zmq::message_t msg(msgSize);
+    char *dataStart, *dataEnd, *msgDataStart;
 
-    std::cout << "Node sending message: " << (char*) msg.data() << std::endl;
+    /* Copy topic and data into msg */
+    msgDataStart = static_cast<char*>(msg.data());
+    std::copy(topicStr.begin(), topicStr.end(), msgDataStart);
+    dataStart = static_cast<char*>(dataPtr);
+    dataEnd = dataStart + dataSize;
+    msgDataStart += MSG_TOPIC_SIZE;
+    std::copy(dataStart, dataEnd, msgDataStart);
+
+#ifdef NODE_DEBUG
+    std::cout << "Node sending message." << std::endl;
+#endif
 
     pubSock->send(msg);
 
@@ -258,7 +335,9 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     /* Get hash digest of key string */
     result = computeDigest(key_str, &digest);
     if (result != 0) {
+#ifdef NODE_DEBUG
         std::cout << "ERROR: Node::put failed to generate hash digest from key: " << key_str << std::endl;
+#endif
         return -1;
     }
 
@@ -361,7 +440,7 @@ int Node::computeDigest(std::string key_str, digest_t* digest)
     this->hash.CalculateDigest(digest->bytes, (byte*)key, key_size);
 
 #ifdef NODE_DEBUG
-    print_digest(digest);
+    print_digest(*digest);
 #endif
 
     return 0;
@@ -383,7 +462,7 @@ void print_digest(digest_t digest)
 {
     int i;
 
-    std::cout << std::endl;
+    std::cout << "Calculated digest: " << std::endl;
     for (i=0; i<CryptoPP::SHA256::DIGESTSIZE; i++){
         std::cout << ((char) digest.bytes[i]) << std::endl;
     }
