@@ -104,7 +104,7 @@ int Chord::getNodeIP()
             char addressBuffer[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, tmpAddrPtr, addressBuffer, INET_ADDRSTRLEN);
 //            printf("%s IP Address %s\n", ifa->ifa_name, addressBuffer);
-            if (strcmp(target_interface,ifa->ifa_name) == 0) {
+            if (strstr(ifa->ifa_name,target_interface) != nullptr) {
 //                memcpy(this->myIp.ip,addressBuffer,INET_ADDRSTRLEN);
 //                printf("%s IP Address %s\n", ifa->ifa_name, addressBuffer);
                 this->myIp.ip = addressBuffer;
