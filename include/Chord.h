@@ -9,7 +9,8 @@
 #include <types.h>
 
 #define FINGER_TABLE_SIZE 5
-#define NETWORK_INTERFACE "eth0"
+#define NETWORK_INTERFACE "-eth0"
+
 class Chord
 {
 public:
@@ -21,10 +22,17 @@ public:
     void join(chord_t* bootstrap);
 private:
     CryptoPP::SHA256 hasher;
-    digest_t myId;
     chord_t finger[FINGER_TABLE_SIZE];
     chord_t predecessor;
-    chord_t myIp;
+    chord_t myId;
+
+    void updateOthers();
+    void initFingerTable(chord_t* bootstrap);
+    void findSuccessor(digest_t id);
+    chord_t findPredecessor(digest_t id);
+    chord_t closestPrecedingFinger(digest_t id);
+    bool isInRange(digest_t begin, digest_t end,digest_t id);
+
 };
 
 #endif //BFDHT_CHORD_H

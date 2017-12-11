@@ -16,6 +16,7 @@
 #define MSG_TYPE_GET_DATA_REQ       0x03
 #define MSG_TYPE_PUT_DATA_REP       0x04
 #define MSG_TYPE_GET_DATA_REP       0x05
+#define MSG_TYPE_CHORD              0x06
 
 typedef struct msg_header_t{
     char msgTopic[MSG_TOPIC_SIZE];

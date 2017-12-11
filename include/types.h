@@ -23,10 +23,20 @@ typedef struct digest_t{
         return false; /* Values are equal */
     }
 
+    bool operator> (const digest_t& other) const {
+        for (int i=0; i<CryptoPP::SHA256::DIGESTSIZE; i++){
+            if (this->bytes[i] > other.bytes[i]) return true;
+            else if (this->bytes[i] < other.bytes[i]) return false;
+            /* Only continue loop if bytes are equal */
+        }
+        return false; /* Values are equal */
+    }
+
 } digest_t;
 
 typedef struct chord_t{
     std::string ip;
+    digest_t key;
 } chord_t;
 
 #endif //BFDHT_TYPES_H

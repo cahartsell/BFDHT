@@ -73,7 +73,7 @@ int Chord::getNodeID()
         std::cout << "\n";
 
         /*Hash MAC to get Chord ID*/
-        this->hasher.CalculateDigest(this->myId.bytes, (byte*)mac_address, 6);
+        this->hasher.CalculateDigest(this->myId.key.bytes, (byte*)mac_address, 6);
 
 
     } else {
@@ -107,7 +107,7 @@ int Chord::getNodeIP()
             if (strstr(ifa->ifa_name,target_interface) != nullptr) {
 //                memcpy(this->myIp.ip,addressBuffer,INET_ADDRSTRLEN);
 //                printf("%s IP Address %s\n", ifa->ifa_name, addressBuffer);
-                this->myIp.ip = addressBuffer;
+                this->myId.ip = addressBuffer;
                 success = 1;
                 break;
             }
@@ -115,14 +115,14 @@ int Chord::getNodeIP()
     }
     if (ifAddrStruct!=NULL) freeifaddrs(ifAddrStruct);
 
-        std::cout << "Using IP address " << this->myIp.ip << std::endl;
+        std::cout << "Using IP address " << this->myId.ip << std::endl;
 
     return success;
 }
 
 std::string Chord::getIP()
 {
-    return myIp.ip;
+    return myId.ip;
 }
 
 void Chord::join(chord_t* bootstrap = nullptr)
@@ -132,7 +132,8 @@ void Chord::join(chord_t* bootstrap = nullptr)
      *
     */
     if (bootstrap) {
-
+        initFingerTable(bootstrap);
+        updateOthers();
     } else {
         for(int i = 0; i < FINGER_TABLE_SIZE; i++ ){
             this->finger[i] = this->myIp;
@@ -140,4 +141,47 @@ void Chord::join(chord_t* bootstrap = nullptr)
         this->predecessor = this->myIp;
     }
 }
+
+void Chord::updateOthers();
+{
+
+}
+
+void Chord::initFingerTable(chord_t* bootstrap)
+{
+
+}
+
+void Chord::findSuccessor(digest_t id)
+{
+    chord_t pred = findPredecessor(id);
+    return pred.successor;
+}
+
+chord_t Chord::findPredecessor(digest_t id)
+{
+    digest_t tempId = this->myId;
+    digest_t tempSuccesssorId = this->finger[0].id;
+    while !(isInRange(tempId,tempSuccesssorId,id)) {
+        //FIXME: Institute chord message sends/blocks
+        tempId = tempId.closestPrecedingFinger(id);
+        tempSuccesssorId = tempId.successor();
+    }
+}
+
+chord_t Chord::closestPrecedingFinger(digest_t id)
+{
+    for (int i = FINGER_TABLE_SIZE-1; i > 0 ; i--) {
+        if (isInRange(this->myId.key,id,this->finger[i].key)) {
+            return this->finger[i];
+        }
+    }
+    return this->myId;
+}
+
+bool Chord::isInRange(digest_t begin, digest_t end,digest_t id)
+{
+    return ((id > begin && (id < end || end < begin)) || id < end && (id > begin || end < begin));
+}
+
 
