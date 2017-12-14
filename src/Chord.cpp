@@ -136,13 +136,13 @@ void Chord::join(chord_t* bootstrap = nullptr)
         updateOthers();
     } else {
         for(int i = 0; i < FINGER_TABLE_SIZE; i++ ){
-            this->finger[i] = this->myIp;
+            this->finger[i] = this->myId;
         }
-        this->predecessor = this->myIp;
+        this->predecessor = this->myId;
     }
 }
 
-void Chord::updateOthers();
+void Chord::updateOthers()
 {
 
 }
@@ -155,20 +155,29 @@ void Chord::initFingerTable(chord_t* bootstrap)
 void Chord::findSuccessor(digest_t id)
 {
     chord_t pred = findPredecessor(id);
-    return pred.successor;
+    //return pred.successor;
 }
 
+void Chord::returnSucessor() {
+    
+}
+
+/*Searches the network to find the predecessor of a Chord key
+ *
+ * BLOCKING*/
 chord_t Chord::findPredecessor(digest_t id)
 {
-    digest_t tempId = this->myId;
-    digest_t tempSuccesssorId = this->finger[0].id;
-    while !(isInRange(tempId,tempSuccesssorId,id)) {
+    digest_t tempId = this->myId.key;
+    digest_t tempSuccesssorId = this->finger[0].key;
+    while (!isInRange(tempId,tempSuccesssorId,id)) {
         //FIXME: Institute chord message sends/blocks
-        tempId = tempId.closestPrecedingFinger(id);
-        tempSuccesssorId = tempId.successor();
+        //tempId = tempId.closestPrecedingFinger(id);
+        //tempSuccesssorId = tempId.successor();
     }
 }
 
+/*Searches local finger table for the finger closest to an ID
+ * that is before said ID. Worst case returns its own ID*/
 chord_t Chord::closestPrecedingFinger(digest_t id)
 {
     for (int i = FINGER_TABLE_SIZE-1; i > 0 ; i--) {
@@ -176,9 +185,12 @@ chord_t Chord::closestPrecedingFinger(digest_t id)
             return this->finger[i];
         }
     }
+    /*Not within finger table, return self (you are the predecessor)*/
     return this->myId;
 }
 
+/* Checks whether a Chord key is within a range, works across
+ * the circular discontinuity*/
 bool Chord::isInRange(digest_t begin, digest_t end,digest_t id)
 {
     return ((id > begin && (id < end || end < begin)) || id < end && (id > begin || end < begin));

@@ -32,6 +32,7 @@ private:
     chord_t findPredecessor(digest_t id);
     chord_t closestPrecedingFinger(digest_t id);
     bool isInRange(digest_t begin, digest_t end,digest_t id);
+    void returnSucessor();
 
 };
 
