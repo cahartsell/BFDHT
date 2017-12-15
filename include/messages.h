@@ -18,6 +18,7 @@
 #define MSG_TYPE_GET_DATA_REP       0x05
 #define MSG_TYPE_PRE_PREPARE        0x06
 #define MSG_TYPE_PREPARE            0x07
+#define MSG_TYPE_GET_DATA_FWD       0x08
 
 typedef struct msg_header_t{
     char msgTopic[MSG_TOPIC_SIZE];
@@ -59,6 +60,14 @@ typedef struct worker_get_req_msg_t {
     uint16_t msgType;
     digest_t digest;
 } worker_get_req_msg_t;
+
+typedef struct worker_get_fwd_msg_t {
+    worker_get_fwd_msg_t() : msgType(MSG_TYPE_GET_DATA_FWD) {}
+    char msgTopic[MSG_TOPIC_SIZE];
+    char sender[MSG_TOPIC_SIZE];
+    uint16_t msgType;
+    digest_t digest;
+} worker_get_fwd_msg_t;
 
 typedef struct worker_get_rep_msg_t {
     worker_get_rep_msg_t() : msgType(MSG_TYPE_GET_DATA_REP) {}
