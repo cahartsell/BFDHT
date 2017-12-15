@@ -269,6 +269,8 @@ void* Node::workerMain(void* arg)
     zmq::message_t msg;
     worker_msg_header_t msgHeader;
 
+
+
     /* Connect socket to main thread */
     sock = new zmq::socket_t(*(context->zmqContext), ZMQ_PAIR);
     tempAddr = "ipc://";
@@ -311,11 +313,63 @@ void* Node::workerMain(void* arg)
                 std::cout << "Handling pre-prepare message" << std::endl;
 #endif
                 size_t dataSize = msg.size() - sizeof(worker_pre_prepare_t);
-                worker_pre_prepare_t *ppMsg = static_cast<worker_pre_prepare_t*>(msg.data());
+                worker_pre_prepare_t *ppMsg = (worker_pre_prepare_t *) malloc(msg.size());
+                if (ppMsg == nullptr) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+                memcpy(ppMsg, msg.data(), msg.size());
+
+                worker_prepare_t *pMsg = (worker_prepare_t *) malloc(msg.size() - 3*MSG_TOPIC_SIZE);
+                size_t prepareSize = sizeof(worker_prepare_t) + dataSize;
+                memcpy(pMsg->data,ppMsg->data,dataSize);
+                pMsg->digest = ppMsg->digest;
+                pMsg->msgType = MSG_TYPE_PREPARE;
+                for (int i = 0; i < 3; i++){
+#ifdef NODE_DEBUG
+                    std::cout << "Sending prepare message" << std::endl;
+#endif
+                    memcpy(pMsg->msgTopic,ppMsg->peers[i],MSG_TOPIC_SIZE);
+
+                    zmq::message_t tempMsg(prepareSize);
+                    memcpy(tempMsg.data(), pMsg, prepareSize);
+                    sock->send(tempMsg);
+                }
+
+                memcpy(pMsg->msgTopic,ppMsg->msgTopic,MSG_TOPIC_SIZE);
+                worker_prepare_t* prepMessages[DHT_REPLICATION];
+                prepMessages[0] = pMsg;
+
+                int num_responses = 1;
+                while (num_responses < DHT_REPLICATION) {
+                    sock->recv(&msg);
+                    memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+                    if (msgHeader.msgType == MSG_TYPE_COMMIT) {
+#ifdef NODE_DEBUG
+                        std::cout << "Storing a prepare message" << std::endl;
+#endif
+                        prepMessages[num_responses] = (worker_prepare_t *)malloc(msg.size());
+                        memcpy(prepMessages[num_responses], msg.data(), msg.size());
+                        num_responses++;
+                    } else {
+#ifdef NODE_DEBUG
+                        std::cout << "Throwing away a non-prepare message" << std::endl;
+#endif
+                    }
+                }
+
+                /*Consensus happens here, produces a message to commit*/
+
+                //worker_commit_t *cMsg = (worker_commit_t *) malloc
+
+                
                 context->localPut(ppMsg->digest, ppMsg->data, dataSize);
+
+                for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i]);}
                 break;
 
             }
+
 
             case MSG_TYPE_GET_DATA_FWD: {
 #ifdef NODE_DEBUG
