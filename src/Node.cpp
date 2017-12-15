@@ -25,7 +25,6 @@ Node::Node()
     //chord->getNodeID();
     chord->getNodeIP();
 
-
     /*Turn std::string representation of IP into
      * 4-char array. Don't judge me.*/
     std::string tempString = chord->getIP() + ".";
@@ -82,7 +81,13 @@ Node::~Node()
     /* ZMQ Context class destructor calls zmq_ctx_destroy */
     delete zmqContext;
     delete subSock, pubSock;
+    delete clientSockClient, clientSockNode;
     delete chord;
+
+    std::vector<worker_t>::iterator it;
+    for (it = workers.begin(); it != workers.end(); it++){
+        delete it->sock;
+    }
 
     freeTableMem();
 
@@ -132,7 +137,16 @@ int Node::startup() {
 
 int Node::shutdown()
 {
-    /* TODO: Write this function */
+    /* TODO: Perform other cleanup? */
+    worker_msg_header_t msgHeader;
+    zmq::message_t msg(sizeof(msgHeader));
+    msgHeader.msgType = MSG_TYPE_THREAD_SHUTDOWN;
+    memcpy(msg.data(), &msgHeader, msg.size());
+    clientSockClient->send(msg);
+
+    /* FIXME: Wait for shutdown complete message here */
+    //zmq::message_t recvMsg;
+    //clientSockClient->recv(recvMsg);
     return 0;
 }
 
@@ -203,6 +217,15 @@ void* Node::main(void* arg)
             memcpy(&tempHeader, msg.data(), sizeof(tempHeader));
             if (tempHeader.msgType == MSG_TYPE_THREAD_SHUTDOWN){
                 /* TODO: Shutdown threads here */
+                worker_msg_header_t msgHeader;
+                zmq::message_t tempMsg(sizeof(msgHeader));
+                msgHeader.msgType = MSG_TYPE_THREAD_SHUTDOWN;
+                memcpy(tempMsg.data(), &msgHeader, msg.size());
+                std::vector<worker_t>::iterator it;
+                for (it = context->workers.begin(); it != context->workers.end(); it++){
+                    /* FIXME: Wait for shutdown complete? */
+                    it->sock->send(tempMsg);
+                }
                 running = false;
             }
             else{
@@ -280,6 +303,7 @@ void* Node::workerMain(void* arg)
 #endif
                 running = false;
                 /* FIXME: Do any cleanup here */
+                delete sock;
                 break;
 
             case MSG_TYPE_PRE_PREPARE: {
@@ -287,12 +311,7 @@ void* Node::workerMain(void* arg)
                 std::cout << "Handling pre-prepare message" << std::endl;
 #endif
                 size_t dataSize = msg.size() - sizeof(worker_pre_prepare_t);
-                worker_pre_prepare_t *ppMsg = (worker_pre_prepare_t *) malloc(msg.size());
-                if (ppMsg == nullptr) {
-                    /* FIXME: Handle error condition */
-                    break;
-                }
-                memcpy(ppMsg, msg.data(), msg.size());
+                worker_pre_prepare_t *ppMsg = static_cast<worker_pre_prepare_t*>(msg.data());
                 context->localPut(ppMsg->digest, ppMsg->data, dataSize);
                 break;
 
@@ -307,12 +326,7 @@ void* Node::workerMain(void* arg)
                     break;
                 }
 
-                worker_get_fwd_msg_t *getMsg = (worker_get_fwd_msg_t *) malloc(msg.size());
-                if (getMsg == nullptr) {
-                    /* FIXME: Handle error condition */
-                    break;
-                }
-                memcpy(getMsg, msg.data(), msg.size());
+                worker_get_fwd_msg_t *getMsg = static_cast<worker_get_fwd_msg_t*>(msg.data());
                 /* localGet returns pointer to data in hash table and its size */
                 int dataSize;
                 void *data;
@@ -320,7 +334,7 @@ void* Node::workerMain(void* arg)
 
                 size_t repSize = sizeof(worker_get_rep_msg_t) + dataSize;
                 worker_get_rep_msg_t *repMsg = (worker_get_rep_msg_t *) malloc(repSize);
-                memcpy(repMsg->msgTopic,getMsg->sender,MSG_TOPIC_SIZE);
+                memcpy(repMsg->msgTopic, getMsg->sender, MSG_TOPIC_SIZE);
                 repMsg->msgType = MSG_TYPE_GET_DATA_REP;
                 repMsg->digest = getMsg->digest;
                 memcpy(repMsg->data,data,dataSize);
