@@ -9,7 +9,7 @@
 #include <types.h>
 
 #define FINGER_TABLE_SIZE 5
-#define NETWORK_INTERFACE "-eth0"
+#define NETWORK_INTERFACE "eth0"
 
 class Chord
 {

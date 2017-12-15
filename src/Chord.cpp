@@ -136,13 +136,13 @@ void Chord::join(chord_t* bootstrap = nullptr)
         updateOthers();
     } else {
         for(int i = 0; i < FINGER_TABLE_SIZE; i++ ){
-            this->finger[i] = this->myIp;
+            this->finger[i] = this->myId;
         }
-        this->predecessor = this->myIp;
+        this->predecessor = this->myId;
     }
 }
 
-void Chord::updateOthers();
+void Chord::updateOthers()
 {
 
 }
@@ -155,17 +155,17 @@ void Chord::initFingerTable(chord_t* bootstrap)
 void Chord::findSuccessor(digest_t id)
 {
     chord_t pred = findPredecessor(id);
-    return pred.successor;
+    //return pred.successor;
 }
 
 chord_t Chord::findPredecessor(digest_t id)
 {
-    digest_t tempId = this->myId;
-    digest_t tempSuccesssorId = this->finger[0].id;
-    while !(isInRange(tempId,tempSuccesssorId,id)) {
+    digest_t tempId = this->myId.key;
+    digest_t tempSuccesssorId = this->finger[0].key;
+    while (!isInRange(tempId,tempSuccesssorId,id)) {
         //FIXME: Institute chord message sends/blocks
-        tempId = tempId.closestPrecedingFinger(id);
-        tempSuccesssorId = tempId.successor();
+        //tempId = tempId.closestPrecedingFinger(id);
+        //tempSuccesssorId = tempId.successor();
     }
 }
 
