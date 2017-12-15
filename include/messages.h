@@ -81,16 +81,16 @@ typedef struct worker_get_rep_msg_t {
 } worker_get_rep_msg_t;
 
 typedef struct worker_prepare_t {
-worker_get_rep_msg_t() : msgType(MSG_TYPE_PREPARE) {}
-char msgTopic[MSG_TOPIC_SIZE];
-char sender[MSG_TOPIC_SIZE];
-uint16_t msgType;
-digest_t digest;
-char data[];
+    worker_prepare_t() : msgType(MSG_TYPE_PREPARE) {}
+    char msgTopic[MSG_TOPIC_SIZE];
+    char sender[MSG_TOPIC_SIZE];
+    uint16_t msgType;
+    digest_t digest;
+    char data[];
 } worker_prepare_t;
 
 typedef struct worker_commit_t {
-    worker_get_rep_msg_t() : msgType(MSG_TYPE_COMMIT) {}
+    worker_commit_t() : msgType(MSG_TYPE_COMMIT) {}
     char msgTopic[MSG_TOPIC_SIZE];
     char sender[MSG_TOPIC_SIZE];
     uint16_t msgType;
