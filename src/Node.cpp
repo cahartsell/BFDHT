@@ -563,7 +563,10 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
 
     value_t answer;
     result = checkConsensus(responses, DHT_REPLICATION, &answer);
+    int tempInt;
     for (int i = 0; i < DHT_REPLICATION; i++){
+        tempInt = *((int*)(responses[i].value_ptr));
+        std::cout << "Response " << i << ": " << tempInt << std::endl;
         free(responses[i].value_ptr);
     }
     if (result == 0){
