@@ -362,7 +362,7 @@ void* Node::workerMain(void* arg)
 
                 //worker_commit_t *cMsg = (worker_commit_t *) malloc
 
-                
+
                 context->localPut(ppMsg->digest, ppMsg->data, dataSize);
 
                 for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i]);}
@@ -1101,7 +1101,6 @@ int handleClientMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<wor
 {
     msg_header_t msgHeader;
     memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-    /* FIXME: This msg is from client. May need to do something differently */
 
     switch (msgHeader.msgType){
         /* Local node needs to do some work. send to worker thread */
