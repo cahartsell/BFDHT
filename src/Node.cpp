@@ -10,10 +10,11 @@
 
 /* Local helper function declarations -- definitions at end of file */
 void print_digest(digest_t digest);
+int checkConsensus(value_t* responses, int responseCnt, value_t* answer);
 int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
 int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worker, char* myTopic);
-int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
+int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *clientSock, std::vector<worker_t> &workers);
 int handleClientMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
 
 Node::Node()
@@ -187,7 +188,7 @@ void* Node::main(void* arg)
             tempSock->recv(&msg);
 
             /* TODO: Handle message from another node */
-            handleNetworkMsg(msg, context->pubSock, context->workers);
+            handleNetworkMsg(msg, context->clientSockNode, context->workers);
         }
 
         /* Check client requests */
@@ -473,29 +474,62 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     memcpy(sendMsg.data(), &getMsg, sendMsg.size());
     this->clientSockClient->send(sendMsg);
 
-    /* Wait for response from node main thread */
+    /* Wait for responses from node main thread */
     worker_get_rep_msg_t *getRep;
-    this->clientSockClient->recv(&recvMsg);
-    getRep = static_cast<worker_get_rep_msg_t*>(malloc(recvMsg.size()));
-    if (getRep == nullptr) {
-        std::cout << "ERROR: Node::get failed to allocate memory for message." << std::endl;
+    value_t responses[DHT_REPLICATION];
+    int num_responses = 0;
+    /* FIXME: need to have timeout */
+    while(num_responses < DHT_REPLICATION) {
+        this->clientSockClient->recv(&recvMsg);
+        getRep = static_cast<worker_get_rep_msg_t *>(recvMsg.data());
+
+        if (getRep->digest == digest) {
+            responses[num_responses].value_size = recvMsg.size() - sizeof(worker_get_rep_msg_t);
+            responses[num_responses].value_ptr = malloc(responses[num_responses].value_size);
+            if(responses[num_responses].value_ptr == nullptr){
+                std::cout << "ERROR: Node::get failed to allocate memory for responses." << std::endl;
+                return -1;
+            }
+            memcpy(responses[num_responses].value_ptr, getRep->data, responses[num_responses].value_size);
+        }
+        else{
+            /* FIXME: How to best handle this? */
+            //std::cout << "ERROR: Node::get received response with incorrect hash key." << std::endl;
+            //return -1;
+        }
+        num_responses++;
+    }
+
+    value_t answer;
+    result = checkConsensus(responses, DHT_REPLICATION, &answer);
+    for (int i = 0; i < DHT_REPLICATION; i++){
+        free(responses[i].value_ptr);
+    }
+    if (result == 0){
+        /* TODO: Handle case with no consensus */
+        std::cout << "ERROR: Node::get failed to reach a consensus." << std::endl;
         return -1;
     }
-    memcpy(getRep, recvMsg.data(), recvMsg.size());
-    if (!(getRep->digest == digest)) {
-        std::cout << "ERROR: Node::get received response with incorrect hash key." << std::endl;
+    if (answer.value_size <= 0){
+        /* TODO: Handle case */
+        std::cout << "ERROR: Node::get received invalid answer data size." << std::endl;
+        return -1;
+    }
+    if (answer.value_ptr == nullptr){
+        /* TODO: Handle case */
+        std::cout << "ERROR: Node::get received null answer pointer." << std::endl;
         return -1;
     }
 
     /* Copy data to memory block and return */
-    size_t dataSize = recvMsg.size() - sizeof(worker_get_rep_msg_t);
-    *(data_ptr) = malloc(dataSize);
+    *(data_ptr) = malloc(answer.value_size);
     if (*(data_ptr) == nullptr) {
         std::cout << "ERROR: Node::get failed to allocate memory for data." << std::endl;
         return -1;
     }
-    memcpy(*(data_ptr), getRep->data, dataSize);
-    *(data_bytes) = dataSize;
+    memcpy(*(data_ptr), answer.value_ptr, answer.value_size);
+    *(data_bytes) = answer.value_size;
+    free(answer.value_ptr);
 
     return 0;
 }
@@ -616,6 +650,60 @@ void print_digest(digest_t digest)
     std::cout << std::endl;
 }
 
+int checkConsensus(value_t* responses, int responseCnt, value_t* answer)
+{
+    /* FIXME: Generalize for >4 */
+    int agreementCnt = 1;
+    int tempSize = responses[0].value_size;
+    void *tempPtr = responses[0].value_ptr;
+    for (int i = 1; i < 4; i++){
+        if (tempSize == responses[i].value_size) {
+            if (memcmp(tempPtr, responses[i].value_ptr, tempSize) == 0) {
+                agreementCnt++;
+            }
+        }
+    }
+    if (agreementCnt >= 3){
+        answer->value_size = tempSize;
+        answer->value_ptr = malloc(tempSize);
+        if(answer->value_ptr == nullptr){
+            std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
+            return -1;
+        }
+        memcpy(answer->value_ptr, tempPtr, tempSize);
+    }
+    else {
+        agreementCnt = 1;
+        tempSize = responses[1].value_size;
+        if (tempSize == responses[0].value_size) {
+            if (memcmp(tempPtr, responses[0].value_ptr, tempSize) == 0) {
+                agreementCnt++;
+            }
+        }
+        for (int i = 2; i < 4; i++) {
+            if (tempSize == responses[i].value_size) {
+                if (memcmp(tempPtr, responses[i].value_ptr, tempSize) == 0) {
+                    agreementCnt++;
+                }
+            }
+        }
+        if (agreementCnt >= 3) {
+            answer->value_size = tempSize;
+            answer->value_ptr = malloc(tempSize);
+            if(answer->value_ptr == nullptr){
+                std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
+                return -1;
+            }
+            memcpy(answer->value_ptr, tempPtr, tempSize);
+        } else {
+            /* No agreement on data size */
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 /* Searches the workers vector (private member of Node) to find a non-busy worker thread
  * Sets argument pointer to first available worker
  * Returns 0 on success or -1 otherwise */
@@ -677,17 +765,15 @@ int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worke
             break;
 
         case MSG_TYPE_GET_DATA_REP:
-            /* Revise sender/destination and Publish message to other nodes */
-            /* FIXME: replace MsgTopic with my IP addr */
-            //memcpy(outMsgHeader.msgTopic, msgHeader.sender, sizeof(outMsgHeader.msgTopic));
-            //memcpy(outMsgHeader.sender, msgHeader.msgTopic, sizeof(outMsgHeader.sender));
-            //outMsgHeader.msgType = MSG_TYPE_GET_DATA_REP;
+            /* Revise sender and Publish message to other nodes */
             memcpy(outMsg.data(), msg.data(), outMsg.size());
             memcpy(outMsgHeader->sender, myTopic, MSG_TOPIC_SIZE);
             pubSock->send(outMsg);
             break;
 
+        /* Forward message to network unless it is directed to this node */
         case MSG_TYPE_PRE_PREPARE:
+        case MSG_TYPE_GET_DATA_FWD:
             memcpy(outMsg.data(), msg.data(), outMsg.size());
             memcpy(outMsgHeader->sender, myTopic, MSG_TOPIC_SIZE);
             if (memcmp(outMsgHeader->msgTopic, myTopic, MSG_TOPIC_SIZE) == 0) {
@@ -709,7 +795,7 @@ int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worke
     return 0;
 }
 
-int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers)
+int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *clientSock, std::vector<worker_t> &workers)
 {
     msg_header_t msgHeader;
     memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
@@ -757,6 +843,10 @@ int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<wo
             }
             tempWorker = nullptr;
             getReq = nullptr;
+            break;
+
+        case MSG_TYPE_GET_DATA_REP:
+            clientSock->send(msg);
             break;
 
         default:
