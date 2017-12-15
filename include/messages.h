@@ -48,9 +48,7 @@ typedef struct worker_pre_prepare_t {
     char sender[MSG_TOPIC_SIZE];
     uint16_t msgType;
     digest_t digest;
-    char peer1[MSG_TOPIC_SIZE];
-    char peer2[MSG_TOPIC_SIZE];
-    char peer3[MSG_TOPIC_SIZE];
+    char peers[3][MSG_TOPIC_SIZE];
     char data[];
 } worker_pre_prepare_t;
 

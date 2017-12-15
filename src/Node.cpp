@@ -272,6 +272,20 @@ void* Node::workerMain(void* arg)
          *       depending on the type of message received */
         switch (msgHeader.msgType) {
 
+            case MSG_TYPE_PRE_PREPARE: {
+#ifdef NODE_DEBUG
+                std::cout << "Handling pre-prepare message" << std::endl;
+#endif
+                size_t dataSize = msg.size() - sizeof(worker_pre_prepare_t);
+                worker_pre_prepare_t *ppMsg = (worker_pre_prepare_t *) malloc(msg.size());
+                if (ppMsg == nullptr) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+                memcpy(ppMsg, msg.data(), msg.size());
+                context->localPut(ppMsg->digest, ppMsg->data, dataSize);
+
+            }
             case MSG_TYPE_THREAD_SHUTDOWN:
 #ifdef NODE_DEBUG
                 std::cout << "Worker shutting down" << std::endl;
@@ -279,6 +293,7 @@ void* Node::workerMain(void* arg)
                 running = false;
                 /* FIXME: Do any cleanup here */
                 break;
+
 
             case MSG_TYPE_PUT_DATA_REQ: {
 #ifdef NODE_DEBUG
@@ -298,23 +313,46 @@ void* Node::workerMain(void* arg)
                 memcpy(putMsg, msg.data(), msg.size());
 
 #ifdef NODE_DEBUG
-                std::cout << "Worker (" << id << ") putting value: " << *((int*)putMsg->data) << std::endl;
+                std::cout << "Worker (" << id << ") starting pre-prepare: " << *((int*)putMsg->data) << std::endl;
 #endif
 
                 char targetTopic[MSG_TOPIC_SIZE];
+                char tempTopic[MSG_TOPIC_SIZE];
                 memcpy(targetTopic,context->myTopic,3);
-                targetTopic[3] = (char)((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1]%NUM_NODES);
-                worker_pre_prepare_t *prePrepareMsg = (worker_pre_prepare_t *) malloc(msg.size());
-
-                for (int i = 0; i < DHT_REPLICATION; i++) {
-
-                }
+                targetTopic[3] = (char)(((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES);
+                memcpy(tempTopic,targetTopic,4);
+                size_t ppSize = msg.size() + 3*MSG_TOPIC_SIZE;
+                worker_pre_prepare_t *prePrepareMsg = (worker_pre_prepare_t *) malloc(ppSize);
+                prePrepareMsg->msgType = MSG_TYPE_PRE_PREPARE;
                 size_t dataSize = msg.size() - sizeof(worker_put_req_msg_t);
-                context->localPut(putMsg->digest, putMsg->data, dataSize);
+
+                int peerCnt = 0;
+                for (int i = 0; i < DHT_REPLICATION; i++) {
+#ifdef NODE_DEBUG
+                    std::cout << "Creating a pre-prepare message" << std::endl;
+#endif
+                    tempTopic[3] = targetTopic[3] + (char)i;
+                    memcpy(prePrepareMsg->msgTopic,tempTopic,4);
+                    for (int j = 0; j < DHT_REPLICATION; j++) {
+                        if (i == j) continue;
+                        tempTopic[3] = targetTopic[3] + (char)j;
+                        memcpy(prePrepareMsg->peers[peerCnt],tempTopic,4);
+                        peerCnt++;
+                    }
+                    peerCnt = 0;
+                    prePrepareMsg->digest = putMsg->digest;
+                    mempcpy(prePrepareMsg->data, putMsg->data, dataSize);
+                    zmq::message_t tempMsg(ppSize);
+                    memcpy(tempMsg.data(), prePrepareMsg, ppSize);
+                    sock->send(tempMsg);
+                }
+
+                //context->localPut(putMsg->digest, putMsg->data, dataSize);
 
                 /* localPut blocks until message is stored in hash table. */
                 /* Safe to free memory at this point */
                 free(putMsg);
+                free(prePrepareMsg);
                 break;
             }
 
