@@ -12,7 +12,7 @@
 void print_digest(digest_t digest);
 int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
-int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock);
+int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *workerSock, char* myTopic);
 int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
 int handleClientMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
 
@@ -177,7 +177,7 @@ void* Node::main(void* arg)
                 tempSock->recv(&msg);
 
                 /* TODO: Handle worker message here */
-                handleWorkerMsg(msg, context->pubSock);
+                handleWorkerMsg(msg, context->pubSock, tempSock, context->myTopic);
             }
         }
 
@@ -648,7 +648,7 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
     worker_t* tempWorker;
     for(it = workers.begin(); it != workers.end(); it++){
         tempWorker = it.base();
-        if ((tempWorker->busy == 1) && (tempWorker->currentKey == key)){
+        if ((tempWorker->busy > 0) && (tempWorker->currentKey == key)){
             *in_worker = tempWorker;
             return 0;
         }
@@ -658,26 +658,37 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
     return -1;
 }
 
-int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock){
+int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *workerSock, char* myTopic){
     zmq::message_t outMsg(msg.size());
-    worker_msg_header_t msgHeader, outMsgHeader;
-    memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+    worker_msg_header_t *msgHeader, *outMsgHeader;
+    msgHeader = static_cast<worker_msg_header_t*>(msg.data());
+    outMsgHeader = static_cast<worker_msg_header_t*>(msg.data());
 
-    switch (msgHeader.msgType){
+    switch (msgHeader->msgType){
         case MSG_TYPE_PUT_DATA_REP:
             /* TODO: Does the worker need to reply to put requests? */
             break;
+
         case MSG_TYPE_GET_DATA_REP:
             /* Revise sender/destination and Publish message to other nodes */
             /* FIXME: replace MsgTopic with my IP addr */
-            memcpy(outMsgHeader.msgTopic, msgHeader.sender, sizeof(outMsgHeader.msgTopic));
-            memcpy(outMsgHeader.sender, msgHeader.msgTopic, sizeof(outMsgHeader.sender));
-            outMsgHeader.msgType = MSG_TYPE_GET_DATA_REP;
-
+            //memcpy(outMsgHeader.msgTopic, msgHeader.sender, sizeof(outMsgHeader.msgTopic));
+            //memcpy(outMsgHeader.sender, msgHeader.msgTopic, sizeof(outMsgHeader.sender));
+            //outMsgHeader.msgType = MSG_TYPE_GET_DATA_REP;
             memcpy(outMsg.data(), msg.data(), outMsg.size());
-            memcpy(outMsg.data(), &outMsgHeader, sizeof(outMsgHeader));
+            memcpy(outMsgHeader->sender, myTopic, MSG_TOPIC_SIZE);
             pubSock->send(outMsg);
             break;
+
+        case MSG_TYPE_PRE_PREPARE:
+            memcpy(outMsg.data(), msg.data(), outMsg.size());
+            memcpy(outMsgHeader->sender, myTopic, MSG_TOPIC_SIZE);
+            if (memcmp(outMsgHeader->msgTopic, myTopic, MSG_TOPIC_SIZE) == 0) {
+                workerSock->send(outMsg);
+            }
+            else {
+                pubSock->send(outMsg);
+            }
         default:
             break;
     }
@@ -690,18 +701,23 @@ int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<wo
     msg_header_t msgHeader;
     memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
 
+    worker_get_req_msg_t *getReq;
+    worker_t *tempWorker;
+    int result;
+
     switch (msgHeader.msgType){
         /* Local node needs to do some work. send to worker thread */
         case MSG_TYPE_GET_DATA_REQ:
         case MSG_TYPE_PRE_PREPARE:
         case MSG_TYPE_PUT_DATA_REQ:
+            getReq = static_cast<worker_get_req_msg_t*>(msg.data());
             /* Dispatch message to worker */
             /* FIXME: Can't assume worker will always be available */
-            worker_t *tempWorker;
-            int result;
             result = findReadyWorker(&tempWorker, workers);
             if(result == 0) {
                 tempWorker->sock->send(msg);
+                tempWorker->busy = true;
+                tempWorker->currentKey = getReq->digest;
             }
             else{
 #ifdef NODE_DEBUG
@@ -709,9 +725,29 @@ int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<wo
 #endif
                 /* TODO: Handle no available worker */
             }
+            tempWorker = nullptr;
+            getReq = nullptr;
+            break;
+
+        case MSG_TYPE_PREPARE:
+            /* Find who this message should be sent to */
+            getReq = static_cast<worker_get_req_msg_t*>(msg.data());
+            result = findWorkerWithKey(&tempWorker, workers, getReq->digest);
+            if(result == 0) {
+                tempWorker->sock->send(msg);
+            }
+            else{
+#ifdef NODE_DEBUG
+                std::cout << "Received PBFT message, but failed to find worker with key." << std::endl;
+#endif
+                /* TODO: Handle no worker with key */
+            }
+            tempWorker = nullptr;
+            getReq = nullptr;
             break;
 
         default:
+            /* TODO: Unrecognized message type error */
             break;
     }
 
