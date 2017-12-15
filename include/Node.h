@@ -9,6 +9,7 @@
 #include <vector>
 #include <pthread.h>
 #include <string>
+#include <mutex>
 
 #include "types.h"
 #include "Chord.h"
@@ -73,6 +74,7 @@ typedef struct worker_t{
     pthread_t thread;
     zmq::socket_t *sock;
     int busy;
+    digest_t currentKey;
 } worker_t;
 
 class Node
@@ -86,9 +88,6 @@ public:
     int put(std::string key_str, void* data_ptr, int data_bytes);
     int get(std::string key_str, void** data_ptr, int* data_bytes);
 
-    int send(std::string topic, void* data_ptr, size_t data_size);
-    int computeDigest(std::string key_str, digest_t* digest);
-
     /* Public Variables */
 
 
@@ -96,7 +95,7 @@ private:
     /* Private Functions */
     static void* main(void* arg);
     static void* workerMain(void* arg);
-    //int computeDigest(std::string key_str, digest_t* digest);
+    int computeDigest(std::string key_str, digest_t* digest);
     void freeTableMem();
     int localPut(digest_t digest, void* data_ptr, int data_bytes);
     int localGet(digest_t digest, void** data_ptr, int* data_bytes);
@@ -105,6 +104,7 @@ private:
     /* Private Variables */
     CryptoPP::SHA256 hash;
     std::map<digest_t, value_t> table;
+    std::mutex tableMutex;
     Chord* chord;
     zmq::context_t *zmqContext;
     zmq::socket_t *subSock, *pubSock;
@@ -112,8 +112,6 @@ private:
     pthread_t mainThread;
     std::vector<worker_t> workers;
     char myTopic[MSG_TOPIC_SIZE];
-
-
 };
 
 

@@ -11,6 +11,7 @@
 /* Local helper function declarations -- definitions at end of file */
 void print_digest(digest_t digest);
 int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers);
+int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
 int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock);
 int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
 int handleClientMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
@@ -397,38 +398,6 @@ void* Node::workerMain(void* arg)
     }
 }
 
-/* FIXME: This is temporary for debugging. Need real version */
-int Node::send(std::string topicStr, void* dataPtr, size_t dataSize)
-{
-    /* Input checks */
-    if (topicStr.size() != MSG_TOPIC_SIZE) {
-        return -1;
-    }
-    if (dataPtr == nullptr){
-        return -1;
-    }
-
-    size_t msgSize = dataSize + MSG_TOPIC_SIZE;
-    zmq::message_t msg(msgSize);
-    char *dataStart, *dataEnd, *msgDataStart;
-
-    /* Copy topic and data into msg */
-    msgDataStart = static_cast<char*>(msg.data());
-    std::copy(topicStr.begin(), topicStr.end(), msgDataStart);
-    dataStart = static_cast<char*>(dataPtr);
-    dataEnd = dataStart + dataSize;
-    msgDataStart += MSG_TOPIC_SIZE;
-    std::copy(dataStart, dataEnd, msgDataStart);
-
-#ifdef NODE_DEBUG
-    std::cout << "Node sending message." << std::endl;
-#endif
-
-    pubSock->send(msg);
-
-    return 0;
-}
-
 int Node::put(std::string key_str, void* data_ptr, int data_bytes)
 {
     /* Find who to route this request too. Currently assumes all requests are local */
@@ -468,45 +437,72 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
 
 int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
 {
-    /* Find who to route this request too. Currently assumes all requests are local */
-    digest_t digest;
-    int result;
-    /* Get hash digest of key string */
-    result = computeDigest(key_str, &digest);
-    if (result != 0) {
-        std::cout << "ERROR: Node::put failed to generate hash digest from key: " << key_str << std::endl;
+    if (data_bytes == nullptr){
+        std::cout << "ERROR: Node::get received null pointer for data_bytes arg" << std::endl;
         return -1;
     }
 
+    /* Get hash digest of key string */
+    digest_t digest;
+    int result;
+    result = computeDigest(key_str, &digest);
+    if (result != 0) {
+        std::cout << "ERROR: Node::get failed to generate hash digest from key: " << key_str << std::endl;
+        return -1;
+    }
+
+    /* Construct message */
     worker_get_req_msg_t getMsg;
     getMsg.msgType = MSG_TYPE_GET_DATA_REQ;
     getMsg.digest = digest;
     memcpy(getMsg.msgTopic, DEFAULT_TOPIC, sizeof(getMsg.msgTopic));
     memcpy(getMsg.sender, DEFAULT_TOPIC, sizeof(getMsg.sender)); //FIXME: MY IP
 
-    zmq::message_t msg(sizeof(getMsg));
-    memcpy(msg.data(), &getMsg, msg.size());
-    this->clientSockClient->send(msg);
+    /* Send message to node main thread */
+    zmq::message_t sendMsg(sizeof(getMsg)), recvMsg;
+    memcpy(sendMsg.data(), &getMsg, sendMsg.size());
+    this->clientSockClient->send(sendMsg);
 
-    /* TODO: Recv on client sock and set values */
+    /* Wait for response from node main thread */
+    worker_get_rep_msg_t *getRep;
+    this->clientSockClient->recv(&recvMsg);
+    getRep = static_cast<worker_get_rep_msg_t*>(malloc(recvMsg.size()));
+    if (getRep == nullptr) {
+        std::cout << "ERROR: Node::get failed to allocate memory for message." << std::endl;
+        return -1;
+    }
+    memcpy(getRep, recvMsg.data(), recvMsg.size());
+    if (!(getRep->digest == digest)) {
+        std::cout << "ERROR: Node::get received response with incorrect hash key." << std::endl;
+        return -1;
+    }
+
+    /* Copy data to memory block and return */
+    size_t dataSize = recvMsg.size() - sizeof(worker_get_rep_msg_t);
+    *(data_ptr) = malloc(dataSize);
+    if (*(data_ptr) == nullptr) {
+        std::cout << "ERROR: Node::get failed to allocate memory for data." << std::endl;
+        return -1;
+    }
+    memcpy(*(data_ptr), getRep->data, dataSize);
+    *(data_bytes) = dataSize;
 
     return 0;
 }
 
-/* FIXME: Likely need mutex for localPut and localGet */
 int Node::localPut(digest_t digest, void* data_ptr, int data_bytes)
 {
     /* Input checks */
     if (data_ptr == nullptr){
-        std::cout << "ERROR: Node::put received NULL data pointer." << std::endl;
+        std::cout << "ERROR: Node::localPut received NULL data pointer." << std::endl;
         return -1;
     }
     if (data_bytes == 0){
-        std::cout << "ERROR: Node::put received data with size 0." << std::endl;
+        std::cout << "ERROR: Node::localPut received data with size 0." << std::endl;
         return -1;
     }
     if (data_bytes > MAX_DATA_SIZE){
-        std::cout << "ERROR: Node::put received data over maximum size. Bytes: " << data_bytes << std::endl;
+        std::cout << "ERROR: Node::localPut received data over maximum size. Bytes: " << data_bytes << std::endl;
         return -1;
     }
 
@@ -516,12 +512,15 @@ int Node::localPut(digest_t digest, void* data_ptr, int data_bytes)
     value.value_ptr = malloc((size_t)data_bytes);
     value.value_size = data_bytes;
     if (value.value_ptr == nullptr){
-        std::cout << "ERROR: Node::put failed to allocate " << value.value_size << " bytes of memory." << std::endl;
+        std::cout << "ERROR: Node::localPut failed to allocate " << value.value_size << " bytes of memory." << std::endl;
         return -1;
     }
     memcpy(value.value_ptr, data_ptr, (size_t)value.value_size);
+
     /* Add/Update value in table */
+    this->tableMutex.lock();
     this->table[digest] = value;
+    this->tableMutex.unlock();
 
     return 0;
 }
@@ -532,26 +531,34 @@ int Node::localGet(digest_t digest, void** data_ptr, int* data_bytes)
 
     /* Check input */
     if (data_bytes == nullptr){
-        std::cout << "ERROR: Node::get received NULL output size pointer." << std::endl;
+        std::cout << "ERROR: Node::localGet received NULL output size pointer." << std::endl;
         return -1;
     }
 
     /* Retrieve stored value and place into outputs */
+    this->tableMutex.lock();
     out_value = this->table[digest];
     if (out_value.value_size == 0){
-        std::cout << "ERROR: Node::get table lookup returned empty data value." << std::endl;
+        std::cout << "ERROR: Node::localGet table lookup returned empty data value." << std::endl;
         return -1;
     }
     if (out_value.value_ptr == nullptr){
-        std::cout << "ERROR: Node::get table lookup returned null data pointer." << std::endl;
+        std::cout << "ERROR: Node::localGet table lookup returned null data pointer." << std::endl;
         return -1;
     }
     if (out_value.value_size > MAX_DATA_SIZE){
-        std::cout << "ERROR: Node::get table lookup returned data over maximum size. Bytes: " << out_value.value_size << std::endl;
+        std::cout << "ERROR: Node::localGet table lookup returned data over maximum size. Bytes: " << out_value.value_size << std::endl;
         return -1;
     }
-    *data_ptr = out_value.value_ptr;
     *data_bytes = out_value.value_size;
+    *data_ptr = malloc(*data_bytes);
+    if(*data_ptr == nullptr){
+        std::cout << "ERROR: Node::localGet failed to allocate memory." << std::endl;
+        this->tableMutex.unlock();
+        return -1;
+    }
+    memcpy(*data_ptr, out_value.value_ptr, *data_bytes);
+    this->tableMutex.unlock();
 
     return 0;
 }
@@ -620,6 +627,31 @@ int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers)
     }
 
     /* All workers busy */
+    return -1;
+}
+
+/* Searches the workers vector (private member of Node) to find a worker thread
+ * that is currently working on a specified key.
+ * Sets argument in_worker to desired worker if found. Otherwise, does not modify.
+ * Returns 0 on success or -1 otherwise */
+int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key)
+{
+    /* Input check */
+    if (in_worker == nullptr){
+        return -1;
+    }
+
+    std::vector<worker_t>::iterator it;
+    worker_t* tempWorker;
+    for(it = workers.begin(); it != workers.end(); it++){
+        tempWorker = it.base();
+        if ((tempWorker->busy == 1) && (tempWorker->currentKey == key)){
+            *in_worker = tempWorker;
+            return 0;
+        }
+    }
+
+    /* No worker currently using specified key */
     return -1;
 }
 

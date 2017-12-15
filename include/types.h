@@ -32,6 +32,13 @@ typedef struct digest_t{
         return false; /* Values are equal */
     }
 
+    bool operator== (const digest_t& other) const {
+        for (int i=0; i<CryptoPP::SHA256::DIGESTSIZE; i++){
+            if (this->bytes[i] != other.bytes[i]) return false;
+        }
+        return true; /* Values are equal */
+    }
+
 } digest_t;
 
 typedef struct chord_t{
