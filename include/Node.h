@@ -21,6 +21,8 @@
 #define MAX_DATA_SIZE               1024    // 1 kB max data size
 #define INIT_WORKER_THREAD_CNT      10
 
+#define DHT_REPLICATION 4
+
 /* Hardcoded multicast IP Address */
 #define MULTICAST_IP "239.192.1.1"
 #define PORT "8476"
@@ -82,6 +84,7 @@ private:
     void freeTableMem();
     int localPut(digest_t digest, void* data_ptr, int data_bytes);
     int localGet(digest_t digest, void** data_ptr, int* data_bytes);
+    void setMyTopic(std::string ip);
 
     /* Private Variables */
     CryptoPP::SHA256 hash;
@@ -91,8 +94,8 @@ private:
     zmq::socket_t *subSock, *pubSock;
     pthread_t mainThread;
     std::vector<worker_t> workers;
+    char myTopic[MSG_TOPIC_SIZE];
 
-    /*finger table*/
 
 };
 

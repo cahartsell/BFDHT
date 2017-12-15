@@ -211,7 +211,7 @@ void* Node::workerMain(void* arg)
                 }
 
                 worker_put_msg_t *putMsg = (worker_put_msg_t *) malloc(msg.size());
-                if (putMsg == nullptr) {
+                    if (putMsg == nullptr) {
                     /* FIXME: Handle error condition */
                     break;
                 }
@@ -220,6 +220,11 @@ void* Node::workerMain(void* arg)
 #ifdef NODE_DEBUG
                 std::cout << "Worker (" << id << ") putting value: " << *((int*)putMsg->data) << std::endl;
 #endif
+
+
+                for(int i = 0; i < DHT_REPLICATION; i++){
+
+                }
                 size_t dataSize = msg.size() - sizeof(worker_put_msg_t);
                 context->localPut(putMsg->digest, putMsg->data, dataSize);
 
@@ -454,6 +459,24 @@ void Node::freeTableMem()
     for(it = this->table.begin(); it != this->table.end(); it++){
         tempVal = it->second;
         free(tempVal.value_ptr);
+    }
+}
+
+void Node::setMyTopic(std::string ip) {
+    char* token;
+    char strarray[100];
+    for(int i = 0; i < ip.length(); i++) {
+        strarray[i] = ip[i];
+    }
+
+    token = std::strtok(strarray,".");
+    for (int i = 0;i < 3; i++) {
+        token = std::strtok(NULL,".");
+        this->myTopic[i] = char
+    //std::cout << lastIp << std::endl;
+    //this->myId.key.bytes[CryptoPP::SHA256::DIGESTSIZE - 1] = (char)()
+    for (int i = 0;i < FINGER_TABLE_SIZE; i++) {
+        //this->finger[i]
     }
 }
 
