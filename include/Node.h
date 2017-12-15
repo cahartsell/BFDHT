@@ -22,6 +22,7 @@
 #define INIT_WORKER_THREAD_CNT      10
 
 #define DHT_REPLICATION 4
+#define NUM_NODES 16
 
 /* Hardcoded multicast IP Address */
 #define MULTICAST_IP "239.192.1.1"
