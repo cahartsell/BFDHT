@@ -320,7 +320,7 @@ void* Node::workerMain(void* arg)
                 char targetTopic[MSG_TOPIC_SIZE];
                 char tempTopic[MSG_TOPIC_SIZE];
                 memcpy(targetTopic,context->myTopic,3);
-                targetTopic[3] = (char)(((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES);
+                targetTopic[3] = (char)((((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES)+1);
                 memcpy(tempTopic,targetTopic,4);
                 size_t ppSize = msg.size() + 3*MSG_TOPIC_SIZE;
                 worker_pre_prepare_t *prePrepareMsg = (worker_pre_prepare_t *) malloc(ppSize);
@@ -328,15 +328,18 @@ void* Node::workerMain(void* arg)
                 size_t dataSize = msg.size() - sizeof(worker_put_req_msg_t);
 
                 int peerCnt = 0;
+                int targetIp;
                 for (int i = 0; i < DHT_REPLICATION; i++) {
 #ifdef NODE_DEBUG
                     std::cout << "Creating a pre-prepare message" << std::endl;
 #endif
-                    tempTopic[3] = targetTopic[3] + (char)i;
+                    targetIp = 1+(((int)targetTopic[3] + i)%NUM_NODES);
+                    tempTopic[3] = (char)targetIp;
                     memcpy(prePrepareMsg->msgTopic,tempTopic,4);
                     for (int j = 0; j < DHT_REPLICATION; j++) {
                         if (i == j) continue;
-                        tempTopic[3] = targetTopic[3] + (char)j;
+                        targetIp = 1+(((int)targetTopic[3] + i)%NUM_NODES);
+                        tempTopic[3] = (char)targetIp;
                         memcpy(prePrepareMsg->peers[peerCnt],tempTopic,4);
                         peerCnt++;
                     }
