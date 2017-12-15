@@ -28,6 +28,7 @@
 /* Hardcoded multicast IP Address */
 #define MULTICAST_IP "239.192.1.1"
 #define PORT "8476"
+#define DEFAULT_TIMEOUT_MS 200
 
 /* Path for IPC communication.
  * '@' symbol makes this an unnamed socket path (doesn't exist on disk)
@@ -60,6 +61,12 @@ typedef struct value_t{
     void* value_ptr;                                    /* Pointer to start of value data */
     int value_size;                                     /* Size of data stored at value_ptr in bytes */
 } value_t;
+
+typedef struct table_entry_t {
+    void* data_ptr;
+    size_t data_size;
+    digest_t digest;
+} table_entry_t;
 
 /* Data type passed to worker thread */
 typedef struct worker_arg_t{

@@ -11,6 +11,7 @@
 /* Local helper function declarations -- definitions at end of file */
 void print_digest(digest_t digest);
 int checkConsensus(value_t* responses, int responseCnt, value_t* answer);
+int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t* answer);
 int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
 int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *clientSock, worker_t *worker, char* myTopic);
@@ -585,11 +586,28 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     worker_get_rep_msg_t *getRep;
     value_t responses[DHT_REPLICATION];
     int num_responses = 0;
+    zmq::pollitem_t pollSock[1];
+    pollSock[0].socket = this->clientSockClient;
+    pollSock[0].events = ZMQ_POLLIN;
     /* FIXME: need to have timeout */
     while(num_responses < DHT_REPLICATION) {
 #ifdef NODE_DEBUG
         std::cout << "Node::get waiting for message." << std::endl;
 #endif
+        /* Poll on socket and check for timeout */
+        result = zmq_poll(pollSock, 1, DEFAULT_TIMEOUT_MS);
+        if(pollSock[0].revents <= 0){
+            std::cout << "Node::get timeout while waiting for message." << std::endl;
+            if (num_responses >= 3){
+                break;
+            }
+            else{
+                for (int i = 0; i < num_responses; i++){
+                    free(responses[i].value_ptr);
+                }
+                return -1;
+            }
+        }
         this->clientSockClient->recv(&recvMsg);
         getRep = static_cast<worker_get_rep_msg_t *>(recvMsg.data());
 
@@ -598,6 +616,9 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
             responses[num_responses].value_ptr = malloc(responses[num_responses].value_size);
             if(responses[num_responses].value_ptr == nullptr){
                 std::cout << "ERROR: Node::get failed to allocate memory for responses." << std::endl;
+                for (int i = 0; i < num_responses; i++){
+                    free(responses[i].value_ptr);
+                }
                 return -1;
             }
             memcpy(responses[num_responses].value_ptr, getRep->data, responses[num_responses].value_size);
@@ -621,16 +642,19 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     if (result != 0){
         /* TODO: Handle case with no consensus */
         std::cout << "ERROR: Node::get failed to reach a consensus." << std::endl;
+        free(answer.value_ptr);
         return -1;
     }
     if (answer.value_size <= 0){
         /* TODO: Handle case */
         std::cout << "ERROR: Node::get received invalid answer data size." << std::endl;
+        free(answer.value_ptr);
         return -1;
     }
     if (answer.value_ptr == nullptr){
         /* TODO: Handle case */
         std::cout << "ERROR: Node::get received null answer pointer." << std::endl;
+        free(answer.value_ptr);
         return -1;
     }
 
@@ -638,6 +662,7 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     *(data_ptr) = malloc(answer.value_size);
     if (*(data_ptr) == nullptr) {
         std::cout << "ERROR: Node::get failed to allocate memory for data." << std::endl;
+        free(answer.value_ptr);
         return -1;
     }
     memcpy(*(data_ptr), answer.value_ptr, answer.value_size);
@@ -766,6 +791,7 @@ void print_digest(digest_t digest)
 int checkConsensus(value_t* responses, int responseCnt, value_t* answer)
 {
     /* FIXME: Generalize for >4 */
+    /* FIXME: Check for null response data_ptr */
     int agreementCnt = 1;
     int tempSize = responses[0].value_size;
     void *tempPtr = responses[0].value_ptr;
@@ -809,6 +835,69 @@ int checkConsensus(value_t* responses, int responseCnt, value_t* answer)
                 return -1;
             }
             memcpy(answer->value_ptr, tempPtr, tempSize);
+        } else {
+            /* No agreement on data size */
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t* answer)
+{
+    /* FIXME: Generalize for >4 */
+    int agreementCnt = 1;
+    digest_t tempDigest = responses[0].digest;
+    int tempSize = responses[0].data_size;
+    void *tempPtr = responses[0].data_ptr;
+    for (int i = 1; i < 4; i++){
+        if(tempDigest == responses[i].digest) {
+            if (tempSize == responses[i].data_size) {
+                if (memcmp(tempPtr, responses[i].data_ptr, tempSize) == 0) {
+                    agreementCnt++;
+                }
+            }
+        }
+    }
+    if (agreementCnt >= 3){
+        answer->data_size = tempSize;
+        answer->data_ptr = malloc(tempSize);
+        if(answer->data_ptr == nullptr){
+            std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
+            return -1;
+        }
+        memcpy(answer->data_ptr, tempPtr, tempSize);
+    }
+    else {
+        agreementCnt = 1;
+        tempDigest = responses[0].digest;
+        tempSize = responses[0].data_size;
+        tempPtr = responses[0].data_ptr;
+        if(tempDigest == responses[0].digest) {
+            if (tempSize == responses[0].data_size) {
+                if (memcmp(tempPtr, responses[0].data_ptr, tempSize) == 0) {
+                    agreementCnt++;
+                }
+            }
+        }
+        for (int i = 2; i < 4; i++) {
+            if(tempDigest == responses[i].digest) {
+                if (tempSize == responses[i].data_size) {
+                    if (memcmp(tempPtr, responses[i].data_ptr, tempSize) == 0) {
+                        agreementCnt++;
+                    }
+                }
+            }
+        }
+        if (agreementCnt >= 3) {
+            answer->data_size = tempSize;
+            answer->data_ptr = malloc(tempSize);
+            if(answer->data_ptr == nullptr){
+                std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
+                return -1;
+            }
+            memcpy(answer->data_ptr, tempPtr, tempSize);
         } else {
             /* No agreement on data size */
             return -1;
@@ -898,6 +987,8 @@ int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *
         /* Forward message to network unless it is directed to this node */
         case MSG_TYPE_PRE_PREPARE:
         case MSG_TYPE_GET_DATA_FWD:
+        case MSG_TYPE_PREPARE:
+        case MSG_TYPE_COMMIT:
             memcpy(outMsg.data(), msg.data(), outMsg.size());
             memcpy(outMsgHeader->sender, myTopic, MSG_TOPIC_SIZE);
             if (memcmp(outMsgHeader->msgTopic, myTopic, MSG_TOPIC_SIZE) == 0) {
@@ -955,6 +1046,7 @@ int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *clientSock, std::vector
             break;
 
         case MSG_TYPE_PREPARE:
+        case MSG_TYPE_COMMIT:
             /* Find who this message should be sent to */
             getReq = static_cast<worker_get_req_msg_t*>(msg.data());
             result = findWorkerWithKey(&tempWorker, workers, getReq->digest);
