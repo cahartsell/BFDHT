@@ -40,6 +40,10 @@ int main() {
             value = std::stoi(valStr);
             node->put(key, &value, sizeof(value));
         }
+        else if(userIn.compare("shutdown") == 0) {
+            node->shutdown();
+            break;
+        }
     }
 
 
