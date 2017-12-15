@@ -8,8 +8,9 @@
 #include <crypto++/sha.h>
 #include <types.h>
 
-#define FINGER_TABLE_SIZE 5
+#define FINGER_TABLE_SIZE 3
 #define NETWORK_INTERFACE "eth0"
+#define KEYSPACE_SIZE 8
 
 class Chord
 {
@@ -32,6 +33,7 @@ private:
     chord_t findPredecessor(digest_t id);
     chord_t closestPrecedingFinger(digest_t id);
     bool isInRange(digest_t begin, digest_t end,digest_t id);
+    void returnSucessor();
 
 };
 
