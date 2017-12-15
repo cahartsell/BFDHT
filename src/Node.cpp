@@ -422,20 +422,21 @@ void* Node::workerMain(void* arg)
 
                         } else {
                             std::cout << "ERROR: Commit Consensus Failed! Aborting..." << std::endl;
+                            break;
                         }
                     }
                     free(cMsg);
 
                 } else {
                     std::cout << "ERROR: Prepare Consensus Failed! Aborting..." << std::endl;
+                    free(pMsg);
+                    free(ppMsg);
+                    for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
+                    break;
                 }
 
                 //worker_commit_t *cMsg = (worker_commit_t *) malloc
-
-
-
-
-
+                std::cout << "Finished storing data." << std::endl;
                 free(pMsg);
                 free(ppMsg);
                 for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
@@ -968,9 +969,9 @@ int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t
     }
     else {
         agreementCnt = 1;
-        tempDigest = responses[0].digest;
-        tempSize = responses[0].data_size;
-        tempPtr = responses[0].data_ptr;
+        tempDigest = responses[1].digest;
+        tempSize = responses[1].data_size;
+        tempPtr = responses[1].data_ptr;
         if(tempDigest == responses[0].digest) {
             if (tempSize == responses[0].data_size) {
                 if (memcmp(tempPtr, responses[0].data_ptr, tempSize) == 0) {
