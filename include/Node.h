@@ -35,6 +35,22 @@
 /* Hardcoded message topic until more appropriate topics available */
 #define DEFAULT_TOPIC "ABCD"
 
+enum pollIds{
+    WORKER_0 = 0,
+    WORKER_1 = 1,
+    WORKER_2 = 2,
+    WORKER_3 = 3,
+    WORKER_4 = 4,
+    WORKER_5 = 5,
+    WORKER_6 = 6,
+    WORKER_7 = 7,
+    WORKER_8 = 8,
+    WORKER_9 = 9,
+    NETWORK_SUB = 10,
+    CLIENT_PAIR = 11,
+    POLL_IDS_SIZE = 12
+};
+
 
 /* Data type for elements stored in the Hash Table */
 typedef struct value_t{
@@ -79,7 +95,6 @@ private:
     /* Private Functions */
     static void* main(void* arg);
     static void* workerMain(void* arg);
-    int findReadyWorker(worker_t** worker);
     //int computeDigest(std::string key_str, digest_t* digest);
     void freeTableMem();
     int localPut(digest_t digest, void* data_ptr, int data_bytes);
@@ -92,6 +107,7 @@ private:
     Chord* chord;
     zmq::context_t *zmqContext;
     zmq::socket_t *subSock, *pubSock;
+    zmq::socket_t *clientSockNode, *clientSockClient;
     pthread_t mainThread;
     std::vector<worker_t> workers;
     char myTopic[MSG_TOPIC_SIZE];

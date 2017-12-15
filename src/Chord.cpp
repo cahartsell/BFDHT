@@ -179,7 +179,7 @@ void Chord::findSuccessor(digest_t id)
 }
 
 void Chord::returnSucessor() {
-    
+
 }
 
 /*Searches the network to find the predecessor of a Chord key
