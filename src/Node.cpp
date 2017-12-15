@@ -12,7 +12,7 @@
 void print_digest(digest_t digest);
 int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
-int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *workerSock, char* myTopic);
+int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worker, char* myTopic);
 int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
 int handleClientMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
 
@@ -70,7 +70,7 @@ Node::Node()
 
     /* Set subscribed messages - All messages directed to this node */
     /* This will need to be based on IP. All nodes subscribed to DEFAULT_TOPIC */
-    subSock->setsockopt(ZMQ_SUBSCRIBE, DEFAULT_TOPIC, strlen(DEFAULT_TOPIC));
+    subSock->setsockopt(ZMQ_SUBSCRIBE, myTopic, strlen(DEFAULT_TOPIC));
 
     //update finger table
 }
@@ -177,7 +177,7 @@ void* Node::main(void* arg)
                 tempSock->recv(&msg);
 
                 /* TODO: Handle worker message here */
-                handleWorkerMsg(msg, context->pubSock, tempSock, context->myTopic);
+                handleWorkerMsg(msg, context->pubSock, &(context->workers[i]), context->myTopic);
             }
         }
 
@@ -272,6 +272,14 @@ void* Node::workerMain(void* arg)
          *       depending on the type of message received */
         switch (msgHeader.msgType) {
 
+            case MSG_TYPE_THREAD_SHUTDOWN:
+#ifdef NODE_DEBUG
+                std::cout << "Worker shutting down" << std::endl;
+#endif
+                running = false;
+                /* FIXME: Do any cleanup here */
+                break;
+
             case MSG_TYPE_PRE_PREPARE: {
 #ifdef NODE_DEBUG
                 std::cout << "Handling pre-prepare message" << std::endl;
@@ -284,16 +292,9 @@ void* Node::workerMain(void* arg)
                 }
                 memcpy(ppMsg, msg.data(), msg.size());
                 context->localPut(ppMsg->digest, ppMsg->data, dataSize);
-
-            }
-            case MSG_TYPE_THREAD_SHUTDOWN:
-#ifdef NODE_DEBUG
-                std::cout << "Worker shutting down" << std::endl;
-#endif
-                running = false;
-                /* FIXME: Do any cleanup here */
                 break;
 
+            }
 
             case MSG_TYPE_PUT_DATA_REQ: {
 #ifdef NODE_DEBUG
@@ -394,7 +395,13 @@ void* Node::workerMain(void* arg)
             default:
                 /* FIXME: Unrecognized message error */
                 break;
-        }
+        } /* End switch MSG_TYPE */
+
+        worker_msg_header_t finishedMsg;
+        zmq::message_t fMsg(sizeof(finishedMsg));
+        finishedMsg.msgType = MSG_TYPE_WORKER_FINISHED;
+        memcpy(fMsg.data(), &finishedMsg, sizeof(finishedMsg));
+        sock->send(fMsg);
     }
 }
 
@@ -425,7 +432,7 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     putMsg->digest = digest;
 
     memcpy(putMsg->msgTopic, DEFAULT_TOPIC, sizeof(putMsg->msgTopic));
-    memcpy(putMsg->sender, DEFAULT_TOPIC, sizeof(putMsg->sender)); //FIXME: MY IP
+    memcpy(putMsg->sender, myTopic, sizeof(putMsg->sender)); //FIXME: MY IP
     memcpy(putMsg->data, data_ptr, data_bytes);
 
     zmq::message_t msg(msgSize);
@@ -456,7 +463,7 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     getMsg.msgType = MSG_TYPE_GET_DATA_REQ;
     getMsg.digest = digest;
     memcpy(getMsg.msgTopic, DEFAULT_TOPIC, sizeof(getMsg.msgTopic));
-    memcpy(getMsg.sender, DEFAULT_TOPIC, sizeof(getMsg.sender)); //FIXME: MY IP
+    memcpy(getMsg.sender, myTopic, sizeof(getMsg.sender)); //FIXME: MY IP
 
     /* Send message to node main thread */
     zmq::message_t sendMsg(sizeof(getMsg)), recvMsg;
@@ -655,7 +662,7 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
     return -1;
 }
 
-int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *workerSock, char* myTopic){
+int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worker, char* myTopic){
     zmq::message_t outMsg(msg.size());
     worker_msg_header_t *msgHeader, *outMsgHeader;
     msgHeader = static_cast<worker_msg_header_t*>(msg.data());
@@ -681,12 +688,18 @@ int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *
             memcpy(outMsg.data(), msg.data(), outMsg.size());
             memcpy(outMsgHeader->sender, myTopic, MSG_TOPIC_SIZE);
             if (memcmp(outMsgHeader->msgTopic, myTopic, MSG_TOPIC_SIZE) == 0) {
-                workerSock->send(outMsg);
+                worker->sock->send(outMsg);
             }
             else {
                 pubSock->send(outMsg);
             }
+
+        case MSG_TYPE_WORKER_FINISHED:
+            worker->busy = false;
+            break;
+
         default:
+            /* TODO: Handle unknown msg type case */
             break;
     }
 
