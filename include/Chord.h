@@ -8,8 +8,9 @@
 #include <crypto++/sha.h>
 #include <types.h>
 
-#define FINGER_TABLE_SIZE 5
-#define NETWORK_INTERFACE "-eth0"
+#define FINGER_TABLE_SIZE 3
+#define NETWORK_INTERFACE "eth0"
+#define KEYSPACE_SIZE 8
 
 class Chord
 {

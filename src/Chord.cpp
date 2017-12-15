@@ -131,15 +131,35 @@ void Chord::join(chord_t* bootstrap = nullptr)
      * if I am not, alert my bootstrap that I am there and set bootstrap as my s and p
      *
     */
-    if (bootstrap) {
-        initFingerTable(bootstrap);
-        updateOthers();
-    } else {
-        for(int i = 0; i < FINGER_TABLE_SIZE; i++ ){
-            this->finger[i] = this->myId;
-        }
-        this->predecessor = this->myId;
+//    if (bootstrap) {
+//        initFingerTable(bootstrap);
+//        updateOthers();
+//    } else {
+//        for(int i = 0; i < FINGER_TABLE_SIZE; i++ ){
+//            this->finger[i] = this->myId;
+//        }
+//        this->predecessor = this->myId;
+//    }
+
+    //Get last number of IPv4 address
+    char* token;
+    char strarray[100];
+    for(int i = 0; i < this->myId.ip.length(); i++) {
+        strarray[i] = this->myId.ip[i];
     }
+
+    token = std::strtok(strarray,".");
+    for (int i = 0;i < 3; i++) {
+        token = std::strtok(NULL,".");
+    }
+
+    int lastIp = atoi(token);
+    //std::cout << lastIp << std::endl;
+    //this->myId.key.bytes[CryptoPP::SHA256::DIGESTSIZE - 1] = (char)()
+    for (int i = 0;i < FINGER_TABLE_SIZE; i++) {
+        //this->finger[i]
+    }
+
 }
 
 void Chord::updateOthers()
