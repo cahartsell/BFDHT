@@ -297,6 +297,41 @@ void* Node::workerMain(void* arg)
 
             }
 
+            case MSG_TYPE_GET_DATA_FWD: {
+#ifdef NODE_DEBUG
+                std::cout << "Handling get_fwd message" << std::endl;
+#endif
+                if (msg.size() < sizeof(worker_get_fwd_msg_t)) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+
+                worker_get_fwd_msg_t *getMsg = (worker_get_fwd_msg_t *) malloc(msg.size());
+                if (getMsg == nullptr) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+                memcpy(getMsg, msg.data(), msg.size());
+                /* localGet returns pointer to data in hash table and its size */
+                int dataSize;
+                void *data;
+                context->localGet(getMsg->digest, &data, &dataSize);
+
+                size_t repSize = sizeof(worker_get_rep_msg_t) + dataSize;
+                worker_get_rep_msg_t *repMsg = (worker_get_rep_msg_t *) malloc(repSize);
+                memcpy(repMsg->msgTopic,getMsg->sender,MSG_TOPIC_SIZE);
+                repMsg->msgType = MSG_TYPE_GET_DATA_REP;
+                repMsg->digest = getMsg->digest;
+                memcpy(repMsg->data,data,dataSize);
+
+                zmq::message_t tempMsg(repSize);
+                memcpy(tempMsg.data(), repMsg, repSize);
+                sock->send(tempMsg);
+
+                free(repMsg);
+                free(data);
+            }
+
             case MSG_TYPE_PUT_DATA_REQ: {
 #ifdef NODE_DEBUG
                 std::cout << "Worker put request started. MSG Size: " << msg.size() << std::endl;
@@ -334,12 +369,14 @@ void* Node::workerMain(void* arg)
 #ifdef NODE_DEBUG
                     std::cout << "Creating a pre-prepare message" << std::endl;
 #endif
-                    targetIp = 1+(((int)targetTopic[3] + i)%NUM_NODES);
+                    targetIp = (int)targetTopic[3] + i;
+                    if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
                     tempTopic[3] = (char)targetIp;
                     memcpy(prePrepareMsg->msgTopic,tempTopic,4);
                     for (int j = 0; j < DHT_REPLICATION; j++) {
                         if (i == j) continue;
-                        targetIp = 1+(((int)targetTopic[3] + i)%NUM_NODES);
+                        targetIp = (int)targetTopic[3] + j;
+                        if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
                         tempTopic[3] = (char)targetIp;
                         memcpy(prePrepareMsg->peers[peerCnt],tempTopic,4);
                         peerCnt++;
@@ -379,20 +416,40 @@ void* Node::workerMain(void* arg)
                 }
                 memcpy(getMsg, msg.data(), msg.size());
 
-                /* localGet returns pointer to data in hash table and its size */
-                int dataSize;
-                void *data;
-                context->localGet(getMsg->digest, &data, &dataSize);
+                char targetTopic[MSG_TOPIC_SIZE];
+                char tempTopic[MSG_TOPIC_SIZE];
+                memcpy(targetTopic,context->myTopic,3);
+                targetTopic[3] = (char)((((int)getMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES)+1);
+                memcpy(tempTopic,targetTopic,4);
+                size_t gfSize = sizeof(worker_get_fwd_msg_t);
+                worker_get_fwd_msg_t *getFwdMsg = (worker_get_fwd_msg_t *) malloc(gfSize);
+                getFwdMsg->msgType = MSG_TYPE_GET_DATA_FWD;
+                getFwdMsg->digest = getMsg->digest;
 
+
+                int targetIp;
+                for (int i = 0; i < DHT_REPLICATION; i++) {
 #ifdef NODE_DEBUG
-                std::cout << "Worker (" << id << ") got value: " << *((int*)data) << std::endl;
+                    std::cout << "Creating a get message" << std::endl;
 #endif
+                    targetIp = (int)targetTopic[3] + i;
+                    if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
+                    tempTopic[3] = (char)targetIp;
+                    memcpy(getFwdMsg->msgTopic,tempTopic,4);
+
+                    zmq::message_t tempMsg(gfSize);
+                    memcpy(tempMsg.data(), getFwdMsg, gfSize);
+                    sock->send(tempMsg);
+                }
+
+
 
                 /* TODO: Send data back to client here */
 
                 /* localGet blocks until message is retrieved from hash table. */
                 /* Safe to free memory at this point */
                 free(getMsg);
+                free(getFwdMsg);
                 break;
             }
 
