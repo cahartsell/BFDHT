@@ -569,7 +569,7 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
         std::cout << "Response " << i << ": " << tempInt << std::endl;
         free(responses[i].value_ptr);
     }
-    if (result == 0){
+    if (result != 0){
         /* TODO: Handle case with no consensus */
         std::cout << "ERROR: Node::get failed to reach a consensus." << std::endl;
         return -1;
@@ -739,6 +739,7 @@ int checkConsensus(value_t* responses, int responseCnt, value_t* answer)
     else {
         agreementCnt = 1;
         tempSize = responses[1].value_size;
+        tempPtr = responses[1].value_ptr;
         if (tempSize == responses[0].value_size) {
             if (memcmp(tempPtr, responses[0].value_ptr, tempSize) == 0) {
                 agreementCnt++;
