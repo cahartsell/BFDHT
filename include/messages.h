@@ -20,6 +20,7 @@
 #define MSG_TYPE_PREPARE            0x07
 #define MSG_TYPE_WORKER_FINISHED    0x08
 #define MSG_TYPE_GET_DATA_FWD       0x09
+#define MSG_TYPE_COMMIT             0x0A
 
 typedef struct msg_header_t{
     char msgTopic[MSG_TOPIC_SIZE];
@@ -78,5 +79,23 @@ typedef struct worker_get_rep_msg_t {
     digest_t digest;
     char data[];
 } worker_get_rep_msg_t;
+
+typedef struct worker_prepare_t {
+worker_get_rep_msg_t() : msgType(MSG_TYPE_PREPARE) {}
+char msgTopic[MSG_TOPIC_SIZE];
+char sender[MSG_TOPIC_SIZE];
+uint16_t msgType;
+digest_t digest;
+char data[];
+} worker_prepare_t;
+
+typedef struct worker_commit_t {
+    worker_get_rep_msg_t() : msgType(MSG_TYPE_COMMIT) {}
+    char msgTopic[MSG_TOPIC_SIZE];
+    char sender[MSG_TOPIC_SIZE];
+    uint16_t msgType;
+    digest_t digest;
+    char data[];
+} worker_commit_t;
 
 #endif //BFDHT_MESSAGES_H
