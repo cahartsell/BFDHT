@@ -61,6 +61,12 @@ typedef struct value_t{
     int value_size;                                     /* Size of data stored at value_ptr in bytes */
 } value_t;
 
+typedef struct table_entry_t {
+    void* data_ptr;
+    size_t data_size;
+    digest_t digest;
+};
+
 /* Data type passed to worker thread */
 typedef struct worker_arg_t{
     worker_arg_t() : node(nullptr), id(0) {}

@@ -11,6 +11,7 @@
 /* Local helper function declarations -- definitions at end of file */
 void print_digest(digest_t digest);
 int checkConsensus(value_t* responses, int responseCnt, value_t* answer);
+int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t* answer);
 int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
 int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *clientSock, worker_t *worker, char* myTopic);
@@ -760,6 +761,69 @@ int checkConsensus(value_t* responses, int responseCnt, value_t* answer)
                 return -1;
             }
             memcpy(answer->value_ptr, tempPtr, tempSize);
+        } else {
+            /* No agreement on data size */
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t* answer)
+{
+    /* FIXME: Generalize for >4 */
+    int agreementCnt = 1;
+    digest_t tempDigest = responses[0].digest;
+    int tempSize = responses[0].data_size;
+    void *tempPtr = responses[0].data_ptr;
+    for (int i = 1; i < 4; i++){
+        if(tempDigest == responses[i].digest) {
+            if (tempSize == responses[i].data_size) {
+                if (memcmp(tempPtr, responses[i].data_ptr, tempSize) == 0) {
+                    agreementCnt++;
+                }
+            }
+        }
+    }
+    if (agreementCnt >= 3){
+        answer->data_size = tempSize;
+        answer->data_ptr = malloc(tempSize);
+        if(answer->data_ptr == nullptr){
+            std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
+            return -1;
+        }
+        memcpy(answer->data_ptr, tempPtr, tempSize);
+    }
+    else {
+        agreementCnt = 1;
+        tempDigest = responses[0].digest;
+        tempSize = responses[0].data_size;
+        tempPtr = responses[0].data_ptr;
+        if(tempDigest == responses[0].digest) {
+            if (tempSize == responses[0].data_size) {
+                if (memcmp(tempPtr, responses[0].data_ptr, tempSize) == 0) {
+                    agreementCnt++;
+                }
+            }
+        }
+        for (int i = 2; i < 4; i++) {
+            if(tempDigest == responses[i].digest) {
+                if (tempSize == responses[i].data_size) {
+                    if (memcmp(tempPtr, responses[i].data_ptr, tempSize) == 0) {
+                        agreementCnt++;
+                    }
+                }
+            }
+        }
+        if (agreementCnt >= 3) {
+            answer->data_size = tempSize;
+            answer->data_ptr = malloc(tempSize);
+            if(answer->data_ptr == nullptr){
+                std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
+                return -1;
+            }
+            memcpy(answer->data_ptr, tempPtr, tempSize);
         } else {
             /* No agreement on data size */
             return -1;
