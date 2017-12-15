@@ -296,6 +296,7 @@ void* Node::workerMain(void* arg)
                 }
                 memcpy(ppMsg, msg.data(), msg.size());
 
+                /*Send out the prepare messages*/
                 worker_prepare_t *pMsg = (worker_prepare_t *) malloc(msg.size() - 3*MSG_TOPIC_SIZE);
                 size_t prepareSize = sizeof(worker_prepare_t) + dataSize;
                 memcpy(pMsg->data,ppMsg->data,dataSize);
@@ -312,20 +313,27 @@ void* Node::workerMain(void* arg)
                     sock->send(tempMsg);
                 }
 
-                memcpy(pMsg->msgTopic,ppMsg->msgTopic,MSG_TOPIC_SIZE);
-                worker_prepare_t* prepMessages[DHT_REPLICATION];
-                prepMessages[0] = pMsg;
+                /*Collect incoming prepare messages*/
+
+                table_entry_t prepMessages[DHT_REPLICATION];
+                prepMessages[0].digest = pMsg->digest;
+                prepMessages[0].data_size = dataSize;
+                prepMessages[0].data_ptr = pMsg->data;
 
                 int num_responses = 1;
                 while (num_responses < DHT_REPLICATION) {
                     sock->recv(&msg);
                     memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-                    if (msgHeader.msgType == MSG_TYPE_COMMIT) {
+                    if (msgHeader.msgType == MSG_TYPE_PREPARE) {
 #ifdef NODE_DEBUG
                         std::cout << "Storing a prepare message" << std::endl;
 #endif
-                        prepMessages[num_responses] = (worker_prepare_t *)malloc(msg.size());
-                        memcpy(prepMessages[num_responses], msg.data(), msg.size());
+                        dataSize = msg.size() - sizeof(worker_prepare_t);
+                        prepMessages[num_responses].digest = ((worker_prepare_t *)msg.data())->digest;
+                        prepMessages[num_responses].data_size = dataSize;
+                        prepMessages[num_responses].data_ptr = malloc(dataSize);
+                        memcpy(prepMessages[num_responses].data_ptr,((worker_prepare_t *)msg.data())->data,dataSize);
+
                         num_responses++;
                     } else {
 #ifdef NODE_DEBUG
@@ -334,14 +342,78 @@ void* Node::workerMain(void* arg)
                     }
                 }
 
+                table_entry_t prepareResult;
                 /*Consensus happens here, produces a message to commit*/
+                if (checkEntryConsensus(prepMessages,4,&prepareResult) == 0){
+                    size_t commitSize = sizeof(worker_commit_t) + prepareResult.data_size;
+                    worker_commit_t *cMsg = (worker_commit_t *) malloc(commitSize);
+                    memcpy(cMsg->data,prepareResult.data_ptr,prepareResult.data_size);
+                    cMsg->digest = prepareResult.digest;
+                    cMsg->msgType = MSG_TYPE_COMMIT;
+
+                    for (int i = 0; i < 3; i++){
+#ifdef NODE_DEBUG
+                        std::cout << "Sending commit message" << std::endl;
+#endif
+                        memcpy(cMsg->msgTopic,ppMsg->peers[i],MSG_TOPIC_SIZE);
+
+                        zmq::message_t tempMsg(commitSize);
+                        memcpy(tempMsg.data(), cMsg, commitSize);
+                        sock->send(tempMsg);
+                    }
+
+                    table_entry_t commitMessages[DHT_REPLICATION];
+                    commitMessages[0].digest = cMsg->digest;
+                    commitMessages[0].data_size = dataSize;
+                    commitMessages[0].data_ptr = cMsg->data;
+
+                    int num_responses = 1;
+                    while (num_responses < DHT_REPLICATION) {
+                        sock->recv(&msg);
+                        memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+                        if (msgHeader.msgType == MSG_TYPE_COMMIT) {
+#ifdef NODE_DEBUG
+                            std::cout << "Storing a commit message" << std::endl;
+#endif
+                            dataSize = msg.size() - sizeof(worker_commit_t);
+                            commitMessages[num_responses].digest = ((worker_commit_t *)msg.data())->digest;
+                            commitMessages[num_responses].data_size = dataSize;
+                            commitMessages[num_responses].data_ptr = malloc(dataSize);
+                            memcpy(commitMessages[num_responses].data_ptr,((worker_commit_t *)msg.data())->data,dataSize);
+
+                            num_responses++;
+                        } else {
+#ifdef NODE_DEBUG
+                            std::cout << "Throwing away a non-commit message" << std::endl;
+#endif
+                        }
+
+                        table_entry_t commitResult;
+                        if (checkEntryConsensus(commitMessages,4,&commitResult) == 0) {
+#ifdef NODE_DEBUG
+                            std::cout << "Storing data..." << std::endl;
+#endif
+                            context->localPut(commitResult.digest, commitResult.data_ptr, commitResult.data_size);
+                            for (int i = 0; i < DHT_REPLICATION; i++) {free(commitMessages[i].data_ptr);}
+
+                        } else {
+                            std::cout << "ERROR: Commit Consensus Failed! Aborting..." << std::endl;
+                        }
+                    }
+                    free(cMsg);
+
+                } else {
+                    std::cout << "ERROR: Prepare Consensus Failed! Aborting..." << std::endl;
+                }
 
                 //worker_commit_t *cMsg = (worker_commit_t *) malloc
 
 
-                context->localPut(ppMsg->digest, ppMsg->data, dataSize);
 
-                for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i]);}
+
+                free(pMsg);
+                free(ppMsg);
+                for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
                 break;
 
             }
