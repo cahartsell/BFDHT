@@ -23,6 +23,30 @@ Node::Node()
     //chord->getNodeID();
     chord->getNodeIP();
 
+
+    /*Turn std::string representation of IP into
+     * 4-char array. Don't judge me.*/
+    std::string tempString = chord->getIP() + ".";
+
+    char* token;
+    char strarray[100];
+    for(int i = 0; i < tempString.length(); i++) {
+        strarray[i] = tempString[i];
+    }
+
+    token = std::strtok(strarray,".");
+    this->myTopic[0] = (char)atoi(token);
+    for (int i = 1;i < MSG_TOPIC_SIZE; i++) {
+        token = std::strtok(NULL,".");
+        this->myTopic[i] = (char)atoi(token);
+    }
+
+    //verify that the 4 char array is good
+//    for (int i = 0; i < MSG_TOPIC_SIZE; i++) {
+//        std::cout << (int)this->myTopic[i];
+//    }
+//    std::cout << std::endl;
+
     /* Prepare ZMQ Context and main sockets */
     zmqContext = new zmq::context_t();
     subSock = new zmq::socket_t(*zmqContext, ZMQ_SUB);
@@ -276,6 +300,15 @@ void* Node::workerMain(void* arg)
 #ifdef NODE_DEBUG
                 std::cout << "Worker (" << id << ") putting value: " << *((int*)putMsg->data) << std::endl;
 #endif
+
+                char targetTopic[MSG_TOPIC_SIZE];
+                memcpy(targetTopic,context->myTopic,3);
+                targetTopic[3] = (char)((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1]%NUM_NODES);
+                worker_pre_prepare_t *prePrepareMsg = (worker_pre_prepare_t *) malloc(msg.size());
+
+                for (int i = 0; i < DHT_REPLICATION; i++) {
+
+                }
                 size_t dataSize = msg.size() - sizeof(worker_put_req_msg_t);
                 context->localPut(putMsg->digest, putMsg->data, dataSize);
 
@@ -619,6 +652,7 @@ int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<wo
     switch (msgHeader.msgType){
         /* Local node needs to do some work. send to worker thread */
         case MSG_TYPE_GET_DATA_REQ:
+        case MSG_TYPE_PRE_PREPARE:
         case MSG_TYPE_PUT_DATA_REQ:
             /* Dispatch message to worker */
             /* FIXME: Can't assume worker will always be available */
