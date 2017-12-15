@@ -13,7 +13,7 @@ void print_digest(digest_t digest);
 int checkConsensus(value_t* responses, int responseCnt, value_t* answer);
 int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
-int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worker, char* myTopic);
+int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *clientSock, worker_t *worker, char* myTopic);
 int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *clientSock, std::vector<worker_t> &workers);
 int handleClientMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
 
@@ -178,7 +178,7 @@ void* Node::main(void* arg)
                 tempSock->recv(&msg);
 
                 /* TODO: Handle worker message here */
-                handleWorkerMsg(msg, context->pubSock, &(context->workers[i]), context->myTopic);
+                handleWorkerMsg(msg, context->pubSock, context->clientSockNode, &(context->workers[i]), context->myTopic);
             }
         }
 
@@ -330,6 +330,7 @@ void* Node::workerMain(void* arg)
 
                 free(repMsg);
                 free(data);
+                break;
             }
 
             case MSG_TYPE_PUT_DATA_REQ: {
@@ -523,8 +524,8 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     worker_get_req_msg_t getMsg;
     getMsg.msgType = MSG_TYPE_GET_DATA_REQ;
     getMsg.digest = digest;
-    memcpy(getMsg.msgTopic, DEFAULT_TOPIC, sizeof(getMsg.msgTopic));
-    memcpy(getMsg.sender, myTopic, sizeof(getMsg.sender)); //FIXME: MY IP
+    memcpy(getMsg.msgTopic, DEFAULT_TOPIC, MSG_TOPIC_SIZE);
+    memcpy(getMsg.sender, myTopic, MSG_TOPIC_SIZE);
 
     /* Send message to node main thread */
     zmq::message_t sendMsg(sizeof(getMsg)), recvMsg;
@@ -537,6 +538,9 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     int num_responses = 0;
     /* FIXME: need to have timeout */
     while(num_responses < DHT_REPLICATION) {
+#ifdef NODE_DEBUG
+        std::cout << "Node::get waiting for message." << std::endl;
+#endif
         this->clientSockClient->recv(&recvMsg);
         getRep = static_cast<worker_get_rep_msg_t *>(recvMsg.data());
 
@@ -810,11 +814,11 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
     return -1;
 }
 
-int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worker, char* myTopic){
+int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *clientSock, worker_t *worker, char* myTopic){
     zmq::message_t outMsg(msg.size());
     worker_msg_header_t *msgHeader, *outMsgHeader;
     msgHeader = static_cast<worker_msg_header_t*>(msg.data());
-    outMsgHeader = static_cast<worker_msg_header_t*>(msg.data());
+    outMsgHeader = static_cast<worker_msg_header_t*>(outMsg.data());
 
     switch (msgHeader->msgType){
         case MSG_TYPE_PUT_DATA_REP:
@@ -822,10 +826,20 @@ int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worke
             break;
 
         case MSG_TYPE_GET_DATA_REP:
+#ifdef NODE_DEBUG
+            std::cout << "Worker handler received GET_DATA reply." << std::endl;
+#endif
             /* Revise sender and Publish message to other nodes */
             memcpy(outMsg.data(), msg.data(), outMsg.size());
             memcpy(outMsgHeader->sender, myTopic, MSG_TOPIC_SIZE);
-            pubSock->send(outMsg);
+            if (memcmp(outMsgHeader->msgTopic, myTopic, MSG_TOPIC_SIZE) == 0) {
+                std::cout << "sending to self." << std::endl;
+                clientSock->send(outMsg);
+            }
+            else {
+                std::cout << "sending to network." << std::endl;
+                pubSock->send(outMsg);
+            }
             break;
 
         /* Forward message to network unless it is directed to this node */
@@ -843,6 +857,7 @@ int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, worker_t *worke
         case MSG_TYPE_WORKER_FINISHED:
             worker->busy = false;
             break;
+
 
         default:
             /* TODO: Handle unknown msg type case */
@@ -866,6 +881,7 @@ int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *clientSock, std::vector
         case MSG_TYPE_GET_DATA_REQ:
         case MSG_TYPE_PRE_PREPARE:
         case MSG_TYPE_PUT_DATA_REQ:
+        case MSG_TYPE_GET_DATA_FWD:
             getReq = static_cast<worker_get_req_msg_t*>(msg.data());
             /* Dispatch message to worker */
             /* FIXME: Can't assume worker will always be available */
@@ -903,6 +919,9 @@ int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *clientSock, std::vector
             break;
 
         case MSG_TYPE_GET_DATA_REP:
+#ifdef NODE_DEBUG
+            std::cout << "Network handler received GET_DATA reply." << std::endl;
+#endif
             clientSock->send(msg);
             break;
 

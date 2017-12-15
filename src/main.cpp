@@ -30,6 +30,8 @@ int main() {
             std::cout << "Waiting for key: " << std::endl;
             std::cin >> key;
             node->get(key, (void**)&valPtr, (int*)&data_size);
+            value = *valPtr;
+            std::cout << "Got: " << value << std::endl;
         }
         else if(userIn.compare("put") == 0) {
             std::cout << "Waiting for key: " << std::endl;
