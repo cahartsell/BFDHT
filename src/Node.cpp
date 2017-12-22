@@ -4,7 +4,6 @@
 
 #include <iostream>
 #include <cstring>
-#include <zmq.h>
 
 #include "Node.h"
 

@@ -13,7 +13,7 @@
 
 #include "types.h"
 #include "Chord.h"
-#include "messages.h"
+#include "message.h"
 
 /********** DEBUGGING FLAG ON ***********/
 #define NODE_DEBUG
