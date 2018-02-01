@@ -27,13 +27,14 @@
 
 /* Hardcoded multicast IP Address */
 #define MULTICAST_IP "239.192.1.1"
+#define NETWORK_PROTOCOL "tcp://"
 #define PORT "8476"
 #define DEFAULT_TIMEOUT_MS 200
 
 /* Path for IPC communication.
  * '@' symbol makes this an unnamed socket path (doesn't exist on disk)
  * Don't have to worry about socket cleanup or already exists conflicts */
-#define IPC_PATH "@/tmp/BFDHT/"
+#define INPROC_PATH "@/tmp/BFDHT/"
 
 /* Hardcoded message topic until more appropriate topics available */
 #define DEFAULT_TOPIC "ABCD"
@@ -49,7 +50,7 @@ enum pollIds{
     WORKER_7 = 7,
     WORKER_8 = 8,
     WORKER_9 = 9,
-    NETWORK_SUB = 10,
+    NETWORK_SRV = 10,
     CLIENT_PAIR = 11,
     POLL_IDS_SIZE = 12
 };
@@ -68,6 +69,12 @@ typedef struct table_entry_t {
     digest_t digest;
 } table_entry_t;
 
+/* Data type passed to main thread */
+typedef struct main_thread_data_t {
+    void *node;
+    pthread_barrier_t* barrier;
+} main_thread_data_t;
+
 /* Data type passed to worker thread */
 typedef struct worker_arg_t{
     worker_arg_t() : node(nullptr), id(0) {}
@@ -83,6 +90,12 @@ typedef struct worker_t{
     int busy;
     digest_t currentKey;
 } worker_t;
+
+/* Worker request socket type */
+typedef struct worker_req_sock_t{
+    zmq::socket_t *sock;
+    std::string curEndpoint;
+} worker_req_sock_t;
 
 class Node
 {
@@ -108,14 +121,15 @@ private:
     int localGet(digest_t digest, void** data_ptr, int* data_bytes);
     void setMyTopic(std::string ip);
 
+
     /* Private Variables */
     CryptoPP::SHA256 hash;
     std::map<digest_t, value_t> table;
     std::mutex tableMutex;
     Chord* chord;
     zmq::context_t *zmqContext;
-    zmq::socket_t *subSock, *pubSock;
-    zmq::socket_t *clientSockNode, *clientSockClient;
+    //zmq::socket_t *proxyControlSock, *clientSockNode, *clientSockClient;
+    zmq::socket_t *proxyControlSock, *clientSock;
     pthread_t mainThread;
     std::vector<worker_t> workers;
     char myTopic[MSG_TOPIC_SIZE];

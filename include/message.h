@@ -12,6 +12,7 @@
 #include "types.h"
 
 #define MSG_TOPIC_SIZE 4
+#define IP_ADDR_SIZE 4
 
 /* Message Types */
 #define MSG_TYPE_THREAD_SHUTDOWN    0x01
@@ -27,7 +28,7 @@
 
 typedef struct msg_header_t{
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     char data[];
 } msg_header_t;
@@ -35,33 +36,41 @@ typedef struct msg_header_t{
 typedef struct worker_msg_header_t{
     worker_msg_header_t() : msgType((uint16_t)0) {}
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
 } worker_msg_header_t;
 
 typedef struct worker_put_req_msg_t {
     worker_put_req_msg_t() : msgType(MSG_TYPE_PUT_DATA_REQ) {}
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char data[];
 } worker_put_req_msg_t;
 
+typedef struct worker_put_rep_msg_t {
+    worker_put_rep_msg_t() : msgType(MSG_TYPE_PUT_DATA_REP) {}
+    char msgTopic[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
+    uint16_t msgType;
+    char result;
+} worker_put_rep_msg_t;
+
 typedef struct worker_pre_prepare_t {
     worker_pre_prepare_t() : msgType(MSG_TYPE_PRE_PREPARE) {}
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
-    char peers[3][MSG_TOPIC_SIZE];
+    char peers[3][IP_ADDR_SIZE];
     char data[];
 } worker_pre_prepare_t;
 
 typedef struct worker_get_req_msg_t {
     worker_get_req_msg_t() : msgType(MSG_TYPE_GET_DATA_REQ) {}
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
 } worker_get_req_msg_t;
@@ -69,7 +78,7 @@ typedef struct worker_get_req_msg_t {
 typedef struct worker_get_fwd_msg_t {
     worker_get_fwd_msg_t() : msgType(MSG_TYPE_GET_DATA_FWD) {}
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
 } worker_get_fwd_msg_t;
@@ -77,7 +86,7 @@ typedef struct worker_get_fwd_msg_t {
 typedef struct worker_get_rep_msg_t {
     worker_get_rep_msg_t() : msgType(MSG_TYPE_GET_DATA_REP) {}
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char data[];
@@ -86,7 +95,7 @@ typedef struct worker_get_rep_msg_t {
 typedef struct worker_prepare_t {
     worker_prepare_t() : msgType(MSG_TYPE_PREPARE) {}
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char data[];
@@ -95,28 +104,28 @@ typedef struct worker_prepare_t {
 typedef struct worker_commit_t {
     worker_commit_t() : msgType(MSG_TYPE_COMMIT) {}
     char msgTopic[MSG_TOPIC_SIZE];
-    char sender[MSG_TOPIC_SIZE];
+    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char data[];
 } worker_commit_t;
 
-namespace bfdht
-{
-    template<typename msgStruct>
-    class message
-    {
-    public:
-        /* Public Functions */
-        message();
-        message(zmq::message_t);
-        ~message();
-
-        /* Public Variables */
-        msgStruct data;
-
-    private:
-    };
-}
+//namespace bfdht
+//{
+//    template<typename msgStruct>
+//    class message
+//    {
+//    public:
+//        /* Public Functions */
+//        message();
+//        message(zmq::message_t);
+//        ~message();
+//
+//        /* Public Variables */
+//        msgStruct data;
+//
+//    private:
+//    };
+//}
 
 #endif //BFDHT_MESSAGES_H
