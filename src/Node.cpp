@@ -20,6 +20,8 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
 int handleWorkerMsg(zmq::message_t &msg, zmq::socket_t *pubSock, zmq::socket_t *clientSock, worker_t *worker, char* myTopic);
 int handleNetworkMsg(zmq::message_t &msg, zmq::socket_t *clientSock, std::vector<worker_t> &workers);
 int handleClientMsg(zmq::message_t &msg, zmq::socket_t *pubSock, std::vector<worker_t> &workers);
+zmq_id_t z_recv_id(zmq::socket_t *sock, int flags);
+int z_send_id(zmq::socket_t *sock, zmq_id_t id);
 
 Node::Node()
 {
@@ -187,7 +189,7 @@ void* Node::main(void* arg)
 
     /* Variable init */
     std::vector<worker_t> busyWorkers;
-    std::vector<std::string> availableWorkers;
+    std::vector<zmq_id_t> availableWorkers;
     int running = true, result, i;
     zmq_pollitem_t pollItems[3] = {
             {*srvSock, 0, ZMQ_POLLIN, 0},
@@ -207,21 +209,16 @@ void* Node::main(void* arg)
 
         // Activity on srvSock
         if (pollItems[0].revents > 0){
-            // First frame contains ID
+            // Recv client ID (Reads 1st and 2nd frames)
             zmq::message_t msg;
-            srvSock->recv(&msg);
-            zmq_id_t clientID(msg.size());
-            memcpy(clientID.id_ptr, msg.data(), clientID.size);
-
-            // Second frame should be empty
-            srvSock->recv(&msg);
+            zmq_id_t clientID = z_recv_id(srvSock, ZMQ_NULL);
 
             // Third frame contains data
-            msg_header_t msgHeader;
+            msg_header_t *msgHeader;
             srvSock->recv(&msg);
-            memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+            msgHeader = static_cast<msg_header_t*>(msg.data());
 
-            switch (msgHeader.msgType) {
+            switch (msgHeader->msgType) {
                 case MSG_TYPE_PREPARE:
                 case MSG_TYPE_COMMIT: {
                     worker_prepare_t *clientMsg;
@@ -238,10 +235,8 @@ void* Node::main(void* arg)
                     }
 
                     /* Forward message to appropriate worker */
-                    s_sendmore(*workerSock, tempWorker->sockID);
-                    s_sendmore(*workerSock, "");
-                    s_sendmore(*workerSock, clientID);
-                    s_sendmore(*workerSock, "");
+                    z_send_id(workerSock, tempWorker->sockID);
+                    z_send_id(workerSock, clientID);
                     workerSock->send(msg);
                     break;
                 }
@@ -254,44 +249,51 @@ void* Node::main(void* arg)
                     }
 
                     /* Forward message to available worker */
-                    s_sendmore(*workerSock, availableWorkers.back());
-                    s_sendmore(*workerSock, "");
-                    s_sendmore(*workerSock, clientID);
-                    s_sendmore(*workerSock, "");
+                    z_send_id(workerSock, availableWorkers.back());
+                    z_send_id(workerSock, clientID);
                     workerSock->send(msg);
 
                     /* Update available/busy workers vectors */
                     worker_t tempWorker;
                     tempWorker.sockID = availableWorkers.back();
-                    if (msgHeader.msgType == MSG_TYPE_PRE_PREPARE){
+                    if (msgHeader->msgType == MSG_TYPE_PRE_PREPARE){
                         /* Start of PBFT exchange */
                         worker_pre_prepare_t *clientMsg;
                         clientMsg = static_cast<worker_pre_prepare_t*>(msg.data());
-
                         tempWorker.currentKey = clientMsg->digest;
                     }
                     availableWorkers.pop_back();
                     busyWorkers.push_back(tempWorker);
                     break;
             }
+
+            /* Done with client ID */
+            free(clientID.id_ptr);
         }
 
         /* Activity on workerSock */
         if (pollItems[1].revents > 0){
-            /* First frame has worker ID */
-            std::string workerID = s_recv(*workerSock);
+            /* Read worker ID (1st and 2nd frame) */
+            zmq_id_t workerID = z_recv_id(workerSock, ZMQ_NULL);
             assert(availableWorkers.size() < INIT_WORKER_THREAD_CNT);
             availableWorkers.push_back(workerID);
 
-            /* Second frame is empty */
+            /* Third frame is "READY" or a client reply identity */
             zmq::message_t msg;
             workerSock->recv(&msg);
 
-            /* Third frame is READY or a client reply identity */
-            std::string clientID = s_recv(*workerSock);
+            /* If this is a "READY" message, we are done. Otherwise reply to client */
+            if (strncmp(static_cast<char*>(msg.data()), "READY", 5) != 0){
+                /* Read client ID from msg */
+                zmq_id_t clientID;
+                clientID.size = msg.size();
+                clientID.id_ptr = static_cast<char*>(malloc(msg.size()));
+                if(clientID.id_ptr == nullptr){
+                    logMsg("Proxy failed to allocate memory for clientID");
+                    break;
+                }
+                memcpy(clientID.id_ptr, msg.data(), clientID.size);
 
-            /* If this is a READY message, we are done. Otherwise reply to client */
-            if (strncmp(clientID.c_str(), "READY", 5) != 0){
                 /* 4th frame is empty */
                 workerSock->recv(&msg);
 
@@ -299,8 +301,7 @@ void* Node::main(void* arg)
                 workerSock->recv(&msg);
 
                 /* Forward reply back to client */
-                s_sendmore(*srvSock, clientID);
-                s_sendmore(*srvSock, "");
+                z_send_id(workerSock, clientID);
                 srvSock->send(msg);
             }
         }
@@ -479,10 +480,7 @@ void* Node::workerMain(void* arg)
         logMsg("Worker listening for message");
 
         /* Recv client id */
-        std::string clientID = s_recv(*brokerSock);
-
-        /* Empty frame */
-        brokerSock->recv(&msg);
+        zmq_id_t clientID = z_recv_id(brokerSock, ZMQ_NULL);
 
         /* Data frame */
         brokerSock->recv(&msg);
@@ -682,8 +680,7 @@ void* Node::workerMain(void* arg)
                 memcpy(replyMsg.data(), &reply, sizeof(worker_put_rep_msg_t));
 
                 /* Send back reply */
-                s_sendmore(*brokerSock, clientID);
-                s_sendmore(*brokerSock, "");
+                z_send_id(brokerSock, clientID);
                 brokerSock->send(replyMsg);
 
             }
@@ -716,8 +713,7 @@ void* Node::workerMain(void* arg)
                 memcpy(tempMsg.data(), repMsg, repSize);
 
                 /* Send back reply */
-                s_sendmore(*brokerSock, clientID);
-                s_sendmore(*brokerSock, "");
+                z_send_id(brokerSock, clientID);
                 brokerSock->send(tempMsg);
 
                 free(repMsg);
@@ -824,8 +820,7 @@ void* Node::workerMain(void* arg)
                 memcpy(replyMsg.data(), &putReply, sizeof(worker_put_rep_msg_t));
 
                 /* Send back reply */
-                s_sendmore(*brokerSock, clientID);
-                s_sendmore(*brokerSock, "");
+                z_send_id(brokerSock, clientID);
                 brokerSock->send(replyMsg);
 
                 //context->localPut(putMsg->digest, putMsg->data, dataSize);
@@ -925,8 +920,7 @@ void* Node::workerMain(void* arg)
                 memcpy(replyMsg.data(), &getReply, sizeof(worker_get_rep_msg_t));
 
                 /* Send back reply */
-                s_sendmore(*brokerSock, clientID);
-                s_sendmore(*brokerSock, "");
+                z_send_id(brokerSock, clientID);
                 brokerSock->send(replyMsg);
 
                 /* localGet blocks until message is retrieved from hash table. */
@@ -940,6 +934,8 @@ void* Node::workerMain(void* arg)
                 /* FIXME: Unrecognized message error */
                 break;
         } /* End switch MSG_TYPE */
+
+        free(clientID.id_ptr);
 
         /* FIXME: Is this totally useless now? *?
         /*if(sendDone) {
@@ -1622,4 +1618,72 @@ std::string peerArrayToIP(char *ip, size_t ip_len)
     }
 
     return retStr;
+}
+
+zmq_id_t z_recv_id(zmq::socket_t *sock, int flags)
+{
+    /* Input checks */
+    if (sock == nullptr){
+        throw std::invalid_argument("z_recv_id received NULL socket arg.");
+    }
+
+    /* Variable init */
+    zmq_id_t retID;
+    zmq::message_t msg;
+    int result;
+    retID.id_ptr = nullptr;
+    retID.size = 0;
+
+    // First frame contains ID
+    result = sock->recv(&msg, flags);
+    if (result < 0){
+        if (errno == EAGAIN) {
+            logMsg("z_recv_id tried to read socket with no message.");
+        }
+        else{
+            logMsg("z_recv_id failed to read socket.");
+        }
+        return retID;
+    }
+
+    retID.size = msg.size();
+    retID.id_ptr = static_cast<char*>( malloc(msg.size()) );
+    if (retID.id_ptr == nullptr){
+        throw std::runtime_error("Failed to allocate memory.");
+    }
+    memcpy(retID.id_ptr, msg.data(), retID.size);
+
+    // Second frame should be empty
+    result = sock->recv(&msg, flags);
+    if (result < 0){
+        logMsg("z_recv_id tried to read socket with no message.");
+        return retID;
+    }
+
+    return retID;
+}
+
+int z_send_id(zmq::socket_t *sock, zmq_id_t id)
+{
+    /* Input checks */
+    if (sock == nullptr){
+        throw std::invalid_argument("z_send_id received NULL socket arg.");
+    }
+
+    if (id.id_ptr == nullptr){
+        throw std::invalid_argument("z_send_id received NULL id_ptr arg.");
+    }
+
+    if (id.size <= 0){
+        throw std::invalid_argument("z_send_id received invalid size arg.");
+    }
+
+    /* Prepare ID msg */
+    zmq::message_t msg(id.size);
+    memcpy(msg.data(), id.id_ptr, id.size);
+
+    sock->send(msg, ZMQ_SNDMORE);
+    s_sendmore(*sock, "");
+
+    return 0;
 }

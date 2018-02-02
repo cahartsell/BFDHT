@@ -69,6 +69,31 @@ typedef struct table_entry_t {
     digest_t digest;
 } table_entry_t;
 
+/* ZMQ identity storage type */
+typedef struct zmq_id_t{
+    size_t size;
+    char* id_ptr;
+
+//    /* Constructor */
+//    /* FIXME: I don't like throwing errors here */
+//    zmq_id_t(size_t size_) : size(size_)
+//    {
+//        if (size == 0){
+//            throw std::invalid_argument("zmq_id_t size cannot be 0");
+//        }
+//        id_ptr = (char*) malloc(size_);
+//        if (id_ptr == nullptr){
+//            throw std::runtime_error("Failed to allocate memory.");
+//        }
+//    }
+
+//    /* Destructor */
+//    ~zmq_id_t()
+//    {
+//        free(id_ptr);
+//    }
+} zmq_id_t;
+
 /* Data type passed to main thread */
 typedef struct main_thread_data_t {
     void *node;
@@ -86,7 +111,7 @@ typedef struct worker_arg_t{
 typedef struct worker_t{
     worker_t() : thread(0), busy(0) {}  /* Constructor */
     pthread_t thread;
-    std::string sockID;
+    zmq_id_t sockID;
     int busy;
     digest_t currentKey;
 } worker_t;
@@ -96,31 +121,6 @@ typedef struct worker_req_sock_t{
     zmq::socket_t *sock;
     std::string curEndpoint;
 } worker_req_sock_t;
-
-/* ZMQ identity storage type */
-typedef struct zmq_id_t{
-    size_t size;
-    char* id_ptr;
-
-    /* Constructor */
-    /* FIXME: I don't like throwing errors here */
-    zmq_id_t(size_t size_) : size(size_)
-    {
-        if (size == 0){
-            throw std::invalid_argument("zmq_id_t size cannot be 0");
-        }
-        id_ptr = (char*) malloc(size_);
-        if (id_ptr == nullptr){
-            throw std::runtime_error("Failed to allocate memory.");
-        }
-    }
-
-    /* Destructor */
-    ~zmq_id_t()
-    {
-        free(id_ptr);
-    }
-} zmq_id_t;
 
 class Node
 {
