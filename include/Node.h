@@ -84,9 +84,9 @@ typedef struct worker_arg_t{
 
 /* Data type for maintaining worker threads */
 typedef struct worker_t{
-    worker_t() : thread(0), sock(0), busy(0) {}  /* Constructor */
+    worker_t() : thread(0), busy(0) {}  /* Constructor */
     pthread_t thread;
-    zmq::socket_t *sock;
+    std::string sockID;
     int busy;
     digest_t currentKey;
 } worker_t;
@@ -96,6 +96,31 @@ typedef struct worker_req_sock_t{
     zmq::socket_t *sock;
     std::string curEndpoint;
 } worker_req_sock_t;
+
+/* ZMQ identity storage type */
+typedef struct zmq_id_t{
+    size_t size;
+    char* id_ptr;
+
+    /* Constructor */
+    /* FIXME: I don't like throwing errors here */
+    zmq_id_t(size_t size_) : size(size_)
+    {
+        if (size == 0){
+            throw std::invalid_argument("zmq_id_t size cannot be 0");
+        }
+        id_ptr = (char*) malloc(size_);
+        if (id_ptr == nullptr){
+            throw std::runtime_error("Failed to allocate memory.");
+        }
+    }
+
+    /* Destructor */
+    ~zmq_id_t()
+    {
+        free(id_ptr);
+    }
+} zmq_id_t;
 
 class Node
 {
@@ -130,8 +155,7 @@ private:
     zmq::context_t *zmqContext;
     //zmq::socket_t *proxyControlSock, *clientSockNode, *clientSockClient;
     zmq::socket_t *proxyControlSock, *clientSock;
-    pthread_t mainThread;
-    std::vector<worker_t> workers;
+    pthread_t mainThread, workerThreads[INIT_WORKER_THREAD_CNT];
     char myTopic[MSG_TOPIC_SIZE];
 };
 

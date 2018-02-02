@@ -7,6 +7,7 @@
 #include <zmq.h>
 
 #include "Node.h"
+#include "zhelpers.h"
 
 /* Local helper function declarations -- definitions at end of file */
 void print_digest(digest_t digest);
@@ -68,10 +69,10 @@ Node::~Node()
     delete proxyControlSock, clientSock;
     delete chord;
 
-    std::vector<worker_t>::iterator it;
-    for (it = workers.begin(); it != workers.end(); it++){
-        delete it->sock;
-    }
+//    std::vector<worker_t>::iterator it;
+//    for (it = workers.begin(); it != workers.end(); it++){
+//        delete it->sock;
+//    }
 
     freeTableMem();
 
@@ -116,13 +117,13 @@ int Node::startup() {
         //temp_worker.sock->connect(tempAddr.c_str());
 
         /* Spawn worker thread */
+        /* FIXME: Confirm malloc success */
         temp_args = static_cast<worker_arg_t*>( malloc(sizeof(worker_arg_t)) );
         temp_args->id = i;
         temp_args->node = this;
         temp_worker.busy = false;
-        workers.push_back(temp_worker);
         /* FIXME: Need to confirm pthread_create success */
-        pthread_create(&(workers[i].thread), NULL, workerMain, (void*) temp_args);
+        pthread_create(&(workerThreads[i]), NULL, workerMain, (void*) temp_args);
     }
 
     /* Connect client sock to Router */
@@ -161,9 +162,9 @@ void* Node::main(void* arg)
 
     /* Bind Router/Dealer & Control sockets */
     /* FIXME: Does this belong in startup? */
-    zmq::socket_t *srvSock, *dealerSock, *controlSock;
+    zmq::socket_t *srvSock, *workerSock, *controlSock;
     srvSock = new zmq::socket_t(*(context->zmqContext), ZMQ_ROUTER);
-    dealerSock = new zmq::socket_t(*(context->zmqContext), ZMQ_DEALER);
+    workerSock = new zmq::socket_t(*(context->zmqContext), ZMQ_ROUTER);
     controlSock = new zmq::socket_t(*(context->zmqContext), ZMQ_PAIR);
     std::string temp = NETWORK_PROTOCOL;
     /* FIXME: OK to call chord like this? */
@@ -175,7 +176,7 @@ void* Node::main(void* arg)
     temp = "inproc://";
     temp += INPROC_PATH;
     temp += "workers";
-    dealerSock->bind(temp.c_str());
+    workerSock->bind(temp.c_str());
     temp = "inproc://";
     temp += INPROC_PATH;
     temp += "proxy";
@@ -184,22 +185,148 @@ void* Node::main(void* arg)
     /* Signal init complete */
     pthread_barrier_wait(mainData->barrier);
 
-    /* Blocking call to ZMQ proxy. Only stopped by SIGABRT or command on controlSock */
-    /* To stop: */
-    /* zmq_send (control, "TERMINATE", 9, 0); */
-    int result;
-    result = zmq_proxy_steerable(*srvSock, *dealerSock, nullptr, *controlSock);
-    //result = zmq_proxy(*srvSock, *dealerSock, NULL);
-    if (result != 0){
-        std::string tempStr = "Main thread non-0 return from zmq_proxy_steerable. Errno: ";
-        tempStr.append(std::to_string(errno));
-        logMsg(tempStr);
+    /* Variable init */
+    std::vector<worker_t> busyWorkers;
+    std::vector<std::string> availableWorkers;
+    int running = true, result, i;
+    zmq_pollitem_t pollItems[3] = {
+            {*srvSock, 0, ZMQ_POLLIN, 0},
+            {*workerSock, 0, ZMQ_POLLIN, 0},
+            {*controlSock, 0, ZMQ_POLLIN, 0}
+    };
+
+    /* Main proxy loop */
+    while(running){
+        result = zmq_poll(pollItems, 3, -1);
+        if (result == -1){
+            std::string logStr = "ERROR: zmq_poll in broker returned non-0. ";
+            logStr += std::to_string(errno);
+            logMsg(logStr);
+            break; // Something weird happened
+        }
+
+        // Activity on srvSock
+        if (pollItems[0].revents > 0){
+            // First frame contains ID
+            zmq::message_t msg;
+            srvSock->recv(&msg);
+            zmq_id_t clientID(msg.size());
+            memcpy(clientID.id_ptr, msg.data(), clientID.size);
+
+            // Second frame should be empty
+            srvSock->recv(&msg);
+
+            // Third frame contains data
+            msg_header_t msgHeader;
+            srvSock->recv(&msg);
+            memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+
+            switch (msgHeader.msgType) {
+                case MSG_TYPE_PREPARE:
+                case MSG_TYPE_COMMIT: {
+                    worker_prepare_t *clientMsg;
+                    clientMsg = static_cast<worker_prepare_t*>(msg.data());
+
+                    worker_t *tempWorker;
+                    result = findWorkerWithKey(&tempWorker, busyWorkers, clientMsg->digest);
+
+                    if (result != 0) {
+                        /* Didn't find worker with given key */
+                        /* FIXME: How to handle this? */
+                        logMsg("Failed to find worker with desired key");
+                        break;
+                    }
+
+                    /* Forward message to appropriate worker */
+                    s_sendmore(*workerSock, tempWorker->sockID);
+                    s_sendmore(*workerSock, "");
+                    s_sendmore(*workerSock, clientID);
+                    s_sendmore(*workerSock, "");
+                    workerSock->send(msg);
+                    break;
+                }
+
+                default:
+                    if (availableWorkers.size() == 0){
+                        /* FIXME: How to handle this? */
+                        logMsg("All workers busy. Dropping request.");
+                        break;
+                    }
+
+                    /* Forward message to available worker */
+                    s_sendmore(*workerSock, availableWorkers.back());
+                    s_sendmore(*workerSock, "");
+                    s_sendmore(*workerSock, clientID);
+                    s_sendmore(*workerSock, "");
+                    workerSock->send(msg);
+
+                    /* Update available/busy workers vectors */
+                    worker_t tempWorker;
+                    tempWorker.sockID = availableWorkers.back();
+                    if (msgHeader.msgType == MSG_TYPE_PRE_PREPARE){
+                        /* Start of PBFT exchange */
+                        worker_pre_prepare_t *clientMsg;
+                        clientMsg = static_cast<worker_pre_prepare_t*>(msg.data());
+
+                        tempWorker.currentKey = clientMsg->digest;
+                    }
+                    availableWorkers.pop_back();
+                    busyWorkers.push_back(tempWorker);
+                    break;
+            }
+        }
+
+        /* Activity on workerSock */
+        if (pollItems[1].revents > 0){
+            /* First frame has worker ID */
+            std::string workerID = s_recv(*workerSock);
+            assert(availableWorkers.size() < INIT_WORKER_THREAD_CNT);
+            availableWorkers.push_back(workerID);
+
+            /* Second frame is empty */
+            zmq::message_t msg;
+            workerSock->recv(&msg);
+
+            /* Third frame is READY or a client reply identity */
+            std::string clientID = s_recv(*workerSock);
+
+            /* If this is a READY message, we are done. Otherwise reply to client */
+            if (strncmp(clientID.c_str(), "READY", 5) != 0){
+                /* 4th frame is empty */
+                workerSock->recv(&msg);
+
+                /* 5th frame has reply data */
+                workerSock->recv(&msg);
+
+                /* Forward reply back to client */
+                s_sendmore(*srvSock, clientID);
+                s_sendmore(*srvSock, "");
+                srvSock->send(msg);
+            }
+        }
+
+        /* Activity on control socket */
+        if (pollItems[2].revents > 0){
+            /* TODO: Write this */
+        }
     }
-    logMsg("Main thread terminating.");
+
+//    /* Blocking call to ZMQ proxy. Only stopped by SIGABRT or command on controlSock */
+//    /* To stop: */
+//    /* zmq_send (control, "TERMINATE", 9, 0); */
+//    int result;
+//    result = zmq_proxy_steerable(*srvSock, *workerSock, nullptr, *controlSock);
+//    //result = zmq_proxy(*srvSock, *dealerSock, NULL);
+//    if (result != 0){
+//        std::string tempStr = "Main thread non-0 return from zmq_proxy_steerable. Errno: ";
+//        tempStr.append(std::to_string(errno));
+//        logMsg(tempStr);
+//    }
+//    logMsg("Main thread terminating.");
 
     /* Cleanup */
     zmq_close(srvSock);
-    zmq_close(dealerSock);
+    zmq_close(workerSock);
     zmq_close(controlSock);
 }
 
@@ -317,19 +444,19 @@ void* Node::workerMain(void* arg)
     free(arg);
 
     const size_t reqSockCnt = DHT_REPLICATION;
-    zmq::socket_t *repSock;
+    zmq::socket_t *brokerSock;
     worker_req_sock_t reqSock[reqSockCnt];
     zmq_pollitem_t reqSockPoll[reqSockCnt];
     std::string tempAddr;
     zmq::message_t msg;
     worker_msg_header_t msgHeader;
 
-    /* Connect socket to dealer */
-    repSock = new zmq::socket_t(*(context->zmqContext), ZMQ_REP);
+    /* Connect socket to broker */
+    brokerSock = new zmq::socket_t(*(context->zmqContext), ZMQ_REQ);
     tempAddr = "inproc://";
     tempAddr += INPROC_PATH;
     tempAddr += "workers";
-    repSock->connect(tempAddr.c_str());
+    brokerSock->connect(tempAddr.c_str());
 
     /* Spawn request sockets */
     int i;
@@ -344,14 +471,26 @@ void* Node::workerMain(void* arg)
     logstr.append(". Listening for messages");
     logMsg(logstr);
 
+    /* Notify broker we are ready */
+    s_send(*brokerSock, "READY");
+
     int running = true, sendDone = true, result, success;
     while(running) {
         logMsg("Worker listening for message");
 
-        repSock->recv(&msg);
+        /* Recv client id */
+        std::string clientID = s_recv(*brokerSock);
+
+        /* Empty frame */
+        brokerSock->recv(&msg);
+
+        /* Data frame */
+        brokerSock->recv(&msg);
         memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
 
-        logstr = "Worker received message. Type: ";
+        logstr = "Worker ";
+        logstr.append(std::to_string(id));
+        logstr.append(" received message. Type: ");
         logstr.append(std::to_string(msgHeader.msgType));
         logMsg(logstr);
 
@@ -364,7 +503,7 @@ void* Node::workerMain(void* arg)
                 logMsg("Worker shutting down");
                 running = false;
                 /* FIXME: Do any cleanup here */
-                delete repSock;
+                delete brokerSock;
                 break;
 
             case MSG_TYPE_PRE_PREPARE: {
@@ -541,7 +680,11 @@ void* Node::workerMain(void* arg)
                     reply.result = false;
                 }
                 memcpy(replyMsg.data(), &reply, sizeof(worker_put_rep_msg_t));
-                repSock->send(replyMsg);
+
+                /* Send back reply */
+                s_sendmore(*brokerSock, clientID);
+                s_sendmore(*brokerSock, "");
+                brokerSock->send(replyMsg);
 
             }
 
@@ -572,7 +715,10 @@ void* Node::workerMain(void* arg)
                 zmq::message_t tempMsg(repSize);
                 memcpy(tempMsg.data(), repMsg, repSize);
 
-                repSock->send(tempMsg);
+                /* Send back reply */
+                s_sendmore(*brokerSock, clientID);
+                s_sendmore(*brokerSock, "");
+                brokerSock->send(tempMsg);
 
                 free(repMsg);
                 free(data);
@@ -676,7 +822,11 @@ void* Node::workerMain(void* arg)
                 zmq::message_t replyMsg(sizeof(worker_put_rep_msg_t));
                 worker_put_rep_msg_t putReply;
                 memcpy(replyMsg.data(), &putReply, sizeof(worker_put_rep_msg_t));
-                repSock->send(replyMsg);
+
+                /* Send back reply */
+                s_sendmore(*brokerSock, clientID);
+                s_sendmore(*brokerSock, "");
+                brokerSock->send(replyMsg);
 
                 //context->localPut(putMsg->digest, putMsg->data, dataSize);
                 /* localPut blocks until message is stored in hash table. */
@@ -773,7 +923,11 @@ void* Node::workerMain(void* arg)
                 zmq::message_t replyMsg(sizeof(worker_get_rep_msg_t));
                 worker_get_rep_msg_t getReply;
                 memcpy(replyMsg.data(), &getReply, sizeof(worker_get_rep_msg_t));
-                repSock->send(replyMsg);
+
+                /* Send back reply */
+                s_sendmore(*brokerSock, clientID);
+                s_sendmore(*brokerSock, "");
+                brokerSock->send(replyMsg);
 
                 /* localGet blocks until message is retrieved from hash table. */
                 /* Safe to free memory at this point */
