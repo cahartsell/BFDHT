@@ -77,7 +77,6 @@ Node::~Node()
 //    }
 
     freeTableMem();
-
     /* TODO: Cleanup worker threads here */
 }
 
@@ -722,7 +721,7 @@ void* Node::workerMain(void* arg)
             }
 
             case MSG_TYPE_PUT_DATA_REQ: {
-                logMsg("Worker put request started.");
+                logMsg("Worker starting put request.");
 
                 if (msg.size() < sizeof(worker_put_req_msg_t)) {
                     /* FIXME: Handle error condition */
@@ -736,14 +735,14 @@ void* Node::workerMain(void* arg)
                 }
                 memcpy(putMsg, msg.data(), msg.size());
 
-                logMsg("Worker starting put request.");
+                logMsg("Worker put request started.");
 
                 /* FIXME: Topic no longer used, but do need to find who to send to */
                 char targetTopic[MSG_TOPIC_SIZE];
                 char tempTopic[MSG_TOPIC_SIZE];
                 std::string tempAddr;
                 memcpy(targetTopic,context->myTopic,3);
-                targetTopic[3] = (char)((((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES)+1);
+                targetTopic[3] = (char)((((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES)+context->myTopic[3]);
                 memcpy(tempTopic,targetTopic,4);
                 size_t ppSize = msg.size() + 3*MSG_TOPIC_SIZE;
                 worker_pre_prepare_t *prePrepareMsg = (worker_pre_prepare_t *) malloc(ppSize);
@@ -1371,7 +1370,7 @@ int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t
 /* Searches the workers vector (private member of Node) to find a non-busy worker thread
  * Sets argument pointer to first available worker
  * Returns 0 on success or -1 otherwise */
-int findReadyWorker(worker_t** in_worker, std::vector<worker_t> &workers)
+int findReadyWorker(worker_t **in_worker, std::vector<worker_t> &workers)
 {
     /* Input check */
     if (in_worker == nullptr){
@@ -1408,7 +1407,7 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
     for(it = workers.begin(); it != workers.end(); it++){
         tempWorker = it.base();
         std::cout << "TempWorker busy: " << tempWorker->busy << " " << (tempWorker->currentKey == key) << std::endl;
-        if ((tempWorker->busy > 0) && (tempWorker->currentKey == key)){
+        if (tempWorker->currentKey == key){
             *in_worker = tempWorker;
             return 0;
         }

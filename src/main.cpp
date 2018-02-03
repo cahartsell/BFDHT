@@ -26,6 +26,9 @@ int main() {
         std::cin >> userIn;
         //std::cout << "Got input: " << userIn << std::endl;
 
+        /* FIXME: Occasionally SEGFAULT occurs when a command is entered at cmd line.
+         * No idea why. */
+
         if(userIn.compare("get") == 0){
             std::cout << "Waiting for key: " << std::endl;
             std::cin >> key;
