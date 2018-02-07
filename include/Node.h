@@ -138,8 +138,6 @@ private:
     std::map<digest_t, value_t> table;
     std::mutex tableMutex;
     Chord* chord;
-    zmq::context_t *zmqContext;
-    zmq::socket_t *clientSock;
     pthread_t mainThread, workerThreads[INIT_WORKER_THREAD_CNT];
     char myTopic[MSG_TOPIC_SIZE];
 };
