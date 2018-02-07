@@ -20,6 +20,7 @@
 
 #define MAX_KEY_LEN                 256     // 256 character key length
 #define MAX_DATA_SIZE               1024    // 1 kB max data size
+#define MAX_MSG_SIZE                MAX_DATA_SIZE + 256
 #define INIT_WORKER_THREAD_CNT      10
 
 #define DHT_REPLICATION 4
@@ -29,12 +30,13 @@
 #define MULTICAST_IP "239.192.1.1"
 #define NETWORK_PROTOCOL "tcp://"
 #define PORT "8476"
-#define DEFAULT_TIMEOUT_MS 200
+#define DEFAULT_TIMEOUT_MS 2000
 
 /* Path for IPC communication.
  * '@' symbol makes this an unnamed socket path (doesn't exist on disk)
  * Don't have to worry about socket cleanup or already exists conflicts */
-#define INPROC_PATH "@/tmp/BFDHT/"
+#define IPC_BASE_PATH "@/tmp/BFDHT/"
+#define MAX_PATH_LEN 104
 
 /* Hardcoded message topic until more appropriate topics available */
 #define DEFAULT_TOPIC "ABCD"
@@ -51,7 +53,7 @@ enum pollIds{
     WORKER_8 = 8,
     WORKER_9 = 9,
     NETWORK_SRV = 10,
-    CLIENT_PAIR = 11,
+    CLIENT_CMD = 11,
     POLL_IDS_SIZE = 12
 };
 
@@ -73,25 +75,6 @@ typedef struct table_entry_t {
 typedef struct zmq_id_t{
     size_t size;
     char* id_ptr;
-
-//    /* Constructor */
-//    /* FIXME: I don't like throwing errors here */
-//    zmq_id_t(size_t size_) : size(size_)
-//    {
-//        if (size == 0){
-//            throw std::invalid_argument("zmq_id_t size cannot be 0");
-//        }
-//        id_ptr = (char*) malloc(size_);
-//        if (id_ptr == nullptr){
-//            throw std::runtime_error("Failed to allocate memory.");
-//        }
-//    }
-
-//    /* Destructor */
-//    ~zmq_id_t()
-//    {
-//        free(id_ptr);
-//    }
 } zmq_id_t;
 
 /* Data type passed to main thread */
@@ -109,10 +92,8 @@ typedef struct worker_arg_t{
 
 /* Data type for maintaining worker threads */
 typedef struct worker_t{
-    worker_t() : thread(0), busy(0) {}  /* Constructor */
-    pthread_t thread;
-    zmq_id_t sockID;
-    int busy;
+    worker_t() : sock(-1) {}  /* Constructor */
+    int sock;
     digest_t currentKey;
 } worker_t;
 
@@ -121,6 +102,11 @@ typedef struct worker_req_sock_t{
     zmq::socket_t *sock;
     std::string curEndpoint;
 } worker_req_sock_t;
+
+typedef struct worker_new_job_msg_t{
+    sockaddr_storage reqAddr;
+    socklen_t addrLen;
+};
 
 class Node
 {
@@ -153,8 +139,7 @@ private:
     std::mutex tableMutex;
     Chord* chord;
     zmq::context_t *zmqContext;
-    //zmq::socket_t *proxyControlSock, *clientSockNode, *clientSockClient;
-    zmq::socket_t *proxyControlSock, *clientSock;
+    zmq::socket_t *clientSock;
     pthread_t mainThread, workerThreads[INIT_WORKER_THREAD_CNT];
     char myTopic[MSG_TOPIC_SIZE];
 };

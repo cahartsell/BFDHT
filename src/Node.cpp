@@ -5,6 +5,10 @@
 #include <iostream>
 #include <cstring>
 #include <zmq.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <poll.h>
 
 #include "Node.h"
 #include "zhelpers.h"
@@ -58,8 +62,7 @@ Node::Node()
 
     /* Node runs in seperate thread. Local client needs socket to send in requests */
     //clientSockNode = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
-    clientSock = new zmq::socket_t(*zmqContext, ZMQ_REQ);
-    proxyControlSock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
+    clientSock = new zmq::socket_t(*zmqContext, ZMQ_PAIR);
 
     //update finger table
 }
@@ -68,7 +71,7 @@ Node::~Node()
 {
     /* ZMQ Context class destructor calls zmq_ctx_destroy */
     delete zmqContext;
-    delete proxyControlSock, clientSock;
+    delete clientSock;
     delete chord;
 
 //    std::vector<worker_t>::iterator it;
@@ -128,11 +131,9 @@ int Node::startup() {
     }
 
     /* Connect client sock to Router */
-    tempAddr = NETWORK_PROTOCOL;
-    /* FIXME: OK to call chord like this? */
-    tempAddr += chord->getIP();
-    tempAddr += ':';
-    tempAddr += PORT;
+    tempAddr = "inproc://";
+    tempAddr += INPROC_PATH;
+    tempAddr += "client";
     clientSock->connect(tempAddr.c_str());
 
     return 0;
@@ -158,70 +159,144 @@ void* Node::main(void* arg)
 {
     main_thread_data_t *mainData = static_cast<main_thread_data_t*>(arg);
 
-    /* FIXME: Any sockets used in this thread should be initialized here */
-    Node* context = static_cast<Node*>(mainData->node);
-
     /* Bind Router/Dealer & Control sockets */
-    /* FIXME: Does this belong in startup? */
-    zmq::socket_t *srvSock, *workerSock, *controlSock;
-    srvSock = new zmq::socket_t(*(context->zmqContext), ZMQ_ROUTER);
-    workerSock = new zmq::socket_t(*(context->zmqContext), ZMQ_ROUTER);
-    controlSock = new zmq::socket_t(*(context->zmqContext), ZMQ_PAIR);
-    std::string temp = NETWORK_PROTOCOL;
-    /* FIXME: OK to call chord like this? */
-    temp += context->chord->getIP();
-    temp += ':';
-    temp += PORT;
-    std::cout << "Node binding server socket to: " << temp.c_str() << std::endl;
-    srvSock->bind(temp.c_str());
-    temp = "inproc://";
-    temp += INPROC_PATH;
-    temp += "workers";
-    workerSock->bind(temp.c_str());
-    temp = "inproc://";
-    temp += INPROC_PATH;
-    temp += "proxy";
-    controlSock->bind(temp.c_str());
+    /* Socket init sections based heavily off Beej's Networking and UNIX IPC Guides */
+    /* Available at www.beej.us */
+    pollfd pollItems[POLL_IDS_SIZE];
+    int workerSock[INIT_WORKER_THREAD_CNT], result, i;
+    struct sockaddr_un managerAddr;
+    std::string tempPath;
+
+    /* Setup worker sockets */
+    for(i = 0; i < INIT_WORKER_THREAD_CNT; i++) {
+        tempPath = IPC_BASE_PATH "manager/";
+        tempPath.append(std::to_string(i));
+
+        memset(&managerAddr, 0, sizeof(managerAddr));
+        managerAddr.sun_family = AF_UNIX;
+        strncpy(managerAddr.sun_path, tempPath.c_str(), MAX_PATH_LEN);
+
+        workerSock[i] = socket(AF_UNIX, SOCK_DGRAM, 0);
+        if (workerSock[i] < 0){
+            perror("Socket creation failed");
+            continue;
+        }
+
+        result = bind(workerSock[i], (sockaddr*) &managerAddr, sizeof(managerAddr));
+        if (result < 0){
+            perror("Socket bind failed");
+            continue;
+        }
+
+        pollItems[i].fd = workerSock[i];
+        pollItems[i].events = POLLIN;
+    }
+
+    /* Setup client cmd sock */
+    int cmdSock;
+    tempPath = IPC_BASE_PATH "cmd";
+
+    memset(&managerAddr, 0, sizeof(managerAddr));
+    managerAddr.sun_family = AF_UNIX;
+    strncpy(managerAddr.sun_path, tempPath.c_str(), MAX_PATH_LEN);
+
+    cmdSock = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (cmdSock < 0){
+        perror("Socket creation failed");
+    }
+
+    result = bind(cmdSock, (sockaddr*) &managerAddr, sizeof(managerAddr));
+    if (result < 0){
+        perror("Socket bind failed");
+    }
+
+    pollItems[CLIENT_CMD].fd = cmdSock;
+    pollItems[CLIENT_CMD].events = POLLIN;
+
+    /* Setup server sock */
+    int srvSock;
+    struct addrinfo hints, *srvinfo, *tempinfo;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    result = getaddrinfo(NULL, PORT, &hints, &srvinfo);
+    if (result != 0){
+        perror("Getaddrinfo failed.");
+    }
+
+    for (tempinfo = srvinfo; tempinfo != NULL; tempinfo = tempinfo->ai_next){
+        srvSock = socket(tempinfo->ai_family, tempinfo->ai_socktype, tempinfo->ai_protocol);
+        if (srvSock < 0){
+            perror("Socket creation failed");
+            continue;
+        }
+
+        result = bind(srvSock, tempinfo->ai_addr, tempinfo->ai_addrlen);
+        if (result < 0){
+            perror("Socket bind failed");
+            continue;
+        }
+
+        break;
+    }
+
+    if (tempinfo == nullptr){
+        perror("Failed to bind server to any socket");
+    }
+    freeaddrinfo(srvinfo);
+    pollItems[NETWORK_SRV].fd = srvSock;
+    pollItems[NETWORK_SRV].events = POLLIN;
+
+    /* Variable init */
+    std::vector<worker_t> busyWorkers;
+    std::vector<int> availableWorkers;
+    int running = true;
+    struct sockaddr_storage fromAddr;
+    socklen_t fromLen;
+    size_t bufSize = 0;
+    ssize_t bytesRead;
+    void *buf;
+
+    /* Allocate buffer memory */
+    buf = malloc(MAX_MSG_SIZE);
+    if (buf == nullptr) {
+        perror("Failed to allocate message buffer");
+    }
+    else {
+        bufSize = MAX_MSG_SIZE;
+    }
 
     /* Signal init complete */
     pthread_barrier_wait(mainData->barrier);
 
-    /* Variable init */
-    std::vector<worker_t> busyWorkers;
-    std::vector<zmq_id_t> availableWorkers;
-    int running = true, result, i;
-    zmq_pollitem_t pollItems[3] = {
-            {*srvSock, 0, ZMQ_POLLIN, 0},
-            {*workerSock, 0, ZMQ_POLLIN, 0},
-            {*controlSock, 0, ZMQ_POLLIN, 0}
-    };
-
     /* Main proxy loop */
     while(running){
-        result = zmq_poll(pollItems, 3, -1);
+        result = poll(pollItems, POLL_IDS_SIZE, -1);
         if (result == -1){
-            std::string logStr = "ERROR: zmq_poll in broker returned non-0. ";
+            std::string logStr = "ERROR: poll in manager returned non-0. ";
             logStr += std::to_string(errno);
             logMsg(logStr);
             break; // Something weird happened
         }
 
         // Activity on srvSock
-        if (pollItems[0].revents > 0){
-            // Recv client ID (Reads 1st and 2nd frames)
-            zmq::message_t msg;
-            zmq_id_t clientID = z_recv_id(srvSock, ZMQ_NULL);
+        if (pollItems[NETWORK_SRV].revents & POLLIN){
+            bytesRead = recvfrom(srvSock, buf, bufSize, 0, (sockaddr*) &fromAddr, &fromLen);
+            if (bytesRead < sizeof(msg_header_t)){
+                /* All messages should contain a header at minimum */
+                continue;
+            }
 
-            // Third frame contains data
             msg_header_t *msgHeader;
-            srvSock->recv(&msg);
-            msgHeader = static_cast<msg_header_t*>(msg.data());
-
+            msgHeader = static_cast<msg_header_t*>(buf);
             switch (msgHeader->msgType) {
                 case MSG_TYPE_PREPARE:
                 case MSG_TYPE_COMMIT: {
                     worker_prepare_t *clientMsg;
-                    clientMsg = static_cast<worker_prepare_t*>(msg.data());
+                    clientMsg = static_cast<worker_prepare_t*>(buf);
 
                     worker_t *tempWorker;
                     result = findWorkerWithKey(&tempWorker, busyWorkers, clientMsg->digest);
@@ -234,100 +309,84 @@ void* Node::main(void* arg)
                     }
 
                     /* Forward message to appropriate worker */
-                    z_send_id(workerSock, tempWorker->sockID);
-                    z_send_id(workerSock, clientID);
-                    workerSock->send(msg);
+                    sendto(tempWorker->sock, buf, (size_t) bytesRead, 0,
+                           (sockaddr*) &fromAddr, fromLen);
                     break;
                 }
 
-                default:
+                case MSG_TYPE_THREAD_SHUTDOWN:
+                case MSG_TYPE_PUT_DATA_REQ:
+                case MSG_TYPE_GET_DATA_REQ:
+                case MSG_TYPE_PUT_DATA_REP:
+                case MSG_TYPE_GET_DATA_REP:
+                case MSG_TYPE_PRE_PREPARE:
+                case MSG_TYPE_WORKER_FINISHED:
+                case MSG_TYPE_GET_DATA_FWD:
                     if (availableWorkers.size() == 0){
                         /* FIXME: How to handle this? */
                         logMsg("All workers busy. Dropping request.");
                         break;
                     }
 
-                    /* Forward message to available worker */
-                    z_send_id(workerSock, availableWorkers.back());
-                    z_send_id(workerSock, clientID);
-                    workerSock->send(msg);
-
-                    /* Update available/busy workers vectors */
+                    /* Configure tempWorker */
                     worker_t tempWorker;
-                    tempWorker.sockID = availableWorkers.back();
+                    tempWorker.sock = availableWorkers.back();
                     if (msgHeader->msgType == MSG_TYPE_PRE_PREPARE){
-                        /* Start of PBFT exchange */
+                        /* Start of PBFT exchange. Store digest (key) */
                         worker_pre_prepare_t *clientMsg;
-                        clientMsg = static_cast<worker_pre_prepare_t*>(msg.data());
+                        clientMsg = static_cast<worker_pre_prepare_t*>(buf);
                         tempWorker.currentKey = clientMsg->digest;
                     }
+
+                    /* Send start of new job message to appropriate worker */
+                    worker_new_job_msg_t newJob;
+                    newJob.reqAddr = fromAddr;
+                    newJob.addrLen = fromLen;
+                    sendto(tempWorker.sock, &newJob, sizeof(newJob), 0,
+                           (sockaddr*) &fromAddr, fromLen);
+
+                    /* Send actual message */
+                    sendto(tempWorker.sock, &buf, (size_t) bytesRead, 0,
+                           (sockaddr*) &fromAddr, fromLen);
+
+                    /* Update available/busy workers vectors */
                     availableWorkers.pop_back();
                     busyWorkers.push_back(tempWorker);
                     break;
-            }
 
-            /* Done with client ID */
-            free(clientID.id_ptr);
+                default:
+                    /* Unrecognized msg type */
+                    break;
+            }
         }
 
         /* Activity on workerSock */
-        if (pollItems[1].revents > 0){
-            /* Read worker ID (1st and 2nd frame) */
-            zmq_id_t workerID = z_recv_id(workerSock, ZMQ_NULL);
-            assert(availableWorkers.size() < INIT_WORKER_THREAD_CNT);
-            availableWorkers.push_back(workerID);
+        for(i = 0; i < INIT_WORKER_THREAD_CNT; i++) {
+            if (pollItems[i].revents & POLLIN) {
+                /* Read message from worker */
+                int workerSock = pollItems[i].fd;
+                bytesRead = recvfrom(workerSock, buf, bufSize, 0,
+                         (sockaddr*) &fromAddr, &fromLen);
 
-            /* Third frame is "READY" or a client reply identity */
-            zmq::message_t msg;
-            workerSock->recv(&msg);
-
-            /* If this is a "READY" message, we are done. Otherwise reply to client */
-            if (strncmp(static_cast<char*>(msg.data()), "READY", 5) != 0){
-                /* Read client ID from msg */
-                zmq_id_t clientID;
-                clientID.size = msg.size();
-                clientID.id_ptr = static_cast<char*>(malloc(msg.size()));
-                if(clientID.id_ptr == nullptr){
-                    logMsg("Proxy failed to allocate memory for clientID");
-                    break;
+                /* If this is a "READY" message, we are done. Otherwise reply to client */
+                if (strncmp(static_cast<char *>(buf), "READY", 5) == 0) {
+                    assert(availableWorkers.size() < INIT_WORKER_THREAD_CNT);
+                    availableWorkers.push_back(workerSock);
                 }
-                memcpy(clientID.id_ptr, msg.data(), clientID.size);
-
-                /* 4th frame is empty */
-                workerSock->recv(&msg);
-
-                /* 5th frame has reply data */
-                workerSock->recv(&msg);
-
-                /* Forward reply back to client */
-                z_send_id(workerSock, clientID);
-                srvSock->send(msg);
             }
         }
 
-        /* Activity on control socket */
-        if (pollItems[2].revents > 0){
+        /* Activity on client command socket */
+        if (pollItems[CLIENT_CMD].revents  & POLLIN){
             /* TODO: Write this */
         }
     }
 
-//    /* Blocking call to ZMQ proxy. Only stopped by SIGABRT or command on controlSock */
-//    /* To stop: */
-//    /* zmq_send (control, "TERMINATE", 9, 0); */
-//    int result;
-//    result = zmq_proxy_steerable(*srvSock, *workerSock, nullptr, *controlSock);
-//    //result = zmq_proxy(*srvSock, *dealerSock, NULL);
-//    if (result != 0){
-//        std::string tempStr = "Main thread non-0 return from zmq_proxy_steerable. Errno: ";
-//        tempStr.append(std::to_string(errno));
-//        logMsg(tempStr);
-//    }
-//    logMsg("Main thread terminating.");
-
-    /* Cleanup */
-    zmq_close(srvSock);
-    zmq_close(workerSock);
-    zmq_close(controlSock);
+    /* cleanup */
+    for(i = 0; i < POLL_IDS_SIZE; i++){
+        close(pollItems[i].fd);
+        free(buf);
+    }
 }
 
 /* FIXME: Confirm this is all garbage now */
@@ -437,33 +496,38 @@ void* Node::main(void* arg)
 
 void* Node::workerMain(void* arg)
 {
+    /* FIXME: Convert to standard UDP sockets */
     /* Copy arg data then free arg pointer */
     worker_arg_t* args = static_cast<worker_arg_t*>(arg);
     Node* context = static_cast<Node*>(args->node);
     int id = args->id;
     free(arg);
 
-    const size_t reqSockCnt = DHT_REPLICATION;
+    int reqSockCnt = DHT_REPLICATION;
     zmq::socket_t *brokerSock;
     worker_req_sock_t reqSock[reqSockCnt];
-    zmq_pollitem_t reqSockPoll[reqSockCnt];
+    zmq_pollitem_t reqSockPoll[reqSockCnt], brokerSockPoll;
     std::string tempAddr;
     zmq::message_t msg;
     worker_msg_header_t msgHeader;
 
     /* Connect socket to broker */
-    brokerSock = new zmq::socket_t(*(context->zmqContext), ZMQ_REQ);
+    brokerSock = new zmq::socket_t(*(context->zmqContext), ZMQ_DEALER);
     tempAddr = "inproc://";
     tempAddr += INPROC_PATH;
     tempAddr += "workers";
     brokerSock->connect(tempAddr.c_str());
 
+    brokerSockPoll.socket = brokerSock;
+    brokerSockPoll.events = ZMQ_POLLIN;
+
     /* Spawn request sockets */
     int i;
     for(i = 0; i < reqSockCnt; i++){
-        reqSock[i].sock = new zmq::socket_t(*(context->zmqContext), ZMQ_REQ);
+        reqSock[i].sock = new zmq::socket_t(*(context->zmqContext), ZMQ_DEALER);
         reqSockPoll[i].socket = reqSock[i].sock;
         reqSockPoll[i].events = ZMQ_POLLIN;
+        reqSockPoll[i].fd = 0;
     }
 
     std::string logstr = "Worker started with id ";
@@ -472,13 +536,19 @@ void* Node::workerMain(void* arg)
     logMsg(logstr);
 
     /* Notify broker we are ready */
+    s_sendmore(*brokerSock, "");
     s_send(*brokerSock, "READY");
 
     int running = true, sendDone = true, result, success;
     while(running) {
         logMsg("Worker listening for message");
 
-        /* Recv client id */
+        /* Recv empty frame, followed by client id */
+        brokerSock->recv(&msg);
+        if(msg.size() != 0){
+            logMsg("Worker received invalid message format. Dropping message.");
+            continue;
+        }
         zmq_id_t clientID = z_recv_id(brokerSock, ZMQ_NULL);
 
         /* Data frame */
@@ -545,7 +615,7 @@ void* Node::workerMain(void* arg)
                 int num_responses = 1;
                 while (num_responses < DHT_REPLICATION) {
                     // Poll on all req sockets
-                    result = zmq_poll(reqSockPoll, reqSockCnt - 1, DEFAULT_TIMEOUT_MS);
+                    result = zmq_poll(&brokerSockPoll, 1, DEFAULT_TIMEOUT_MS);
 
                     if (result == 0){
                         // Timeout occured
@@ -553,24 +623,22 @@ void* Node::workerMain(void* arg)
                         logMsg("Timeout occurred waiting for prepare messages");
                     }
 
-                    /* FIXME: Make sure each socket only replies once */
-                    for(i = 0; i < reqSockCnt - 1; i++){
-                        if (reqSockPoll[i].revents > 0){
-                            (static_cast<zmq::socket_t*> (reqSockPoll[i].socket))->recv(&msg);
+                    /* FIXME: Make sure each peer only replies once */
+                    if (brokerSockPoll.revents > 0){
+                        brokerSock->recv(&msg);
 
-                            memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-                            if (msgHeader.msgType == MSG_TYPE_PREPARE) {
-                                logMsg("Storing a prepare message");
-                                dataSize = msg.size() - sizeof(worker_prepare_t);
-                                prepMessages[num_responses].digest = ((worker_prepare_t *)msg.data())->digest;
-                                prepMessages[num_responses].data_size = dataSize;
-                                prepMessages[num_responses].data_ptr = malloc(dataSize);
-                                memcpy(prepMessages[num_responses].data_ptr,((worker_prepare_t *)msg.data())->data,dataSize);
+                        memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+                        if (msgHeader.msgType == MSG_TYPE_PREPARE) {
+                            logMsg("Storing a prepare message");
+                            dataSize = msg.size() - sizeof(worker_prepare_t);
+                            prepMessages[num_responses].digest = ((worker_prepare_t *)msg.data())->digest;
+                            prepMessages[num_responses].data_size = dataSize;
+                            prepMessages[num_responses].data_ptr = malloc(dataSize);
+                            memcpy(prepMessages[num_responses].data_ptr,((worker_prepare_t *)msg.data())->data,dataSize);
 
-                                num_responses++;
-                            } else {
-                                logMsg("Throwing away a non-prepare message");
-                            }
+                            num_responses++;
+                        } else {
+                            logMsg("Throwing away a non-prepare message");
                         }
                     }
                 }
@@ -603,7 +671,7 @@ void* Node::workerMain(void* arg)
                     int num_responses = 1;
                     while (num_responses < DHT_REPLICATION) {
                         // Poll on all req sockets
-                        result = zmq_poll(reqSockPoll, reqSockCnt - 1, DEFAULT_TIMEOUT_MS);
+                        result = zmq_poll(&brokerSockPoll, 1, DEFAULT_TIMEOUT_MS);
 
                         if (result == 0){
                             // Timeout occured
@@ -611,25 +679,23 @@ void* Node::workerMain(void* arg)
                             logMsg("Timeout occurred waiting for commit messages");
                         }
 
-                        /* FIXME: Make sure each socket only replies once */
-                        for(i = 0; i < reqSockCnt - 1; i++) {
-                            if(reqSockPoll[i].revents > 0) {
-                                (static_cast<zmq::socket_t*> (reqSockPoll[i].socket))->recv(&msg);
-                                memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-                                if (msgHeader.msgType == MSG_TYPE_COMMIT) {
-                                    logMsg("Storing a commit message");
-                                    dataSize = msg.size() - sizeof(worker_commit_t);
-                                    commitMessages[num_responses].digest = ((worker_commit_t *) msg.data())->digest;
-                                    commitMessages[num_responses].data_size = dataSize;
-                                    commitMessages[num_responses].data_ptr = malloc(dataSize);
-                                    memcpy(commitMessages[num_responses].data_ptr,
-                                           ((worker_commit_t *) msg.data())->data,
-                                           dataSize);
+                        /* FIXME: Make sure each peer only replies once */
+                        if(brokerSockPoll.revents > 0) {
+                            brokerSock->recv(&msg);
+                            memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
+                            if (msgHeader.msgType == MSG_TYPE_COMMIT) {
+                                logMsg("Storing a commit message");
+                                dataSize = msg.size() - sizeof(worker_commit_t);
+                                commitMessages[num_responses].digest = ((worker_commit_t *) msg.data())->digest;
+                                commitMessages[num_responses].data_size = dataSize;
+                                commitMessages[num_responses].data_ptr = malloc(dataSize);
+                                memcpy(commitMessages[num_responses].data_ptr,
+                                       ((worker_commit_t *) msg.data())->data,
+                                       dataSize);
 
-                                    num_responses++;
-                                } else {
-                                    logMsg("Throwing away a non-commit message");
-                                }
+                                num_responses++;
+                            } else {
+                                logMsg("Throwing away a non-commit message");
                             }
                         }
 
@@ -783,7 +849,7 @@ void* Node::workerMain(void* arg)
                 /* FIXME: Wait on reply and do something with it */
                 int numResponses = 0;
                 while(numResponses < DHT_REPLICATION){
-                    zmq_poll(reqSockPoll, reqSockCnt, DEFAULT_TIMEOUT_MS);
+                    result = zmq_poll(reqSockPoll, reqSockCnt, DEFAULT_TIMEOUT_MS);
 
                     if (result == 0){
                         // Timeout occured
@@ -883,7 +949,7 @@ void* Node::workerMain(void* arg)
                 /* FIXME: Wait on reply and do something with it */
                 int numResponses = 0;
                 while(numResponses < DHT_REPLICATION){
-                    zmq_poll(reqSockPoll, reqSockCnt, DEFAULT_TIMEOUT_MS);
+                    result = zmq_poll(reqSockPoll, reqSockCnt, DEFAULT_TIMEOUT_MS);
 
                     if (result == 0){
                         // Timeout occured

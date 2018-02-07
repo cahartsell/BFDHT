@@ -17,17 +17,17 @@ int main() {
     auto node = new Node();
     node->startup();
 
-    std::string userIn, key, valStr;
+    std::string userIn = "";
+    std::string key, valStr;
     int value, *valPtr;
     size_t data_size;
 
     while(1){
         std::cout << "Waiting for command: " << std::endl;
-        std::cin >> userIn;
-        //std::cout << "Got input: " << userIn << std::endl;
-
-        /* FIXME: Occasionally SEGFAULT occurs when a command is entered at cmd line.
-         * No idea why. */
+        /* FIXME: Occasionally SEGFAULT occurred when cin is read into string. */
+        /* No idea why garbage in cin buffer could cause seg fault */
+        std::getline(std::cin, userIn);
+        std::cout << "Got input: " << userIn << std::endl;
 
         if(userIn.compare("get") == 0){
             std::cout << "Waiting for key: " << std::endl;
