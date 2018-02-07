@@ -99,6 +99,16 @@ int Node::startup() {
     mainArg.clientSock = tempPair[0];
     this->clientSock = tempPair[1];
 
+    /* Configure timeout on clientSock */
+    timeval timeout;
+    timeout.tv_sec = DEFAULT_TIMEOUT_MS / 1000;
+    timeout.tv_usec = (DEFAULT_TIMEOUT_MS % 1000) * 1000;
+    rv = setsockopt(this->clientSock, SOL_SOCKET, SO_RCVTIMEO,
+                    (void*) &timeout, sizeof(timeout));
+    if (rv < 0){
+        perror("Failed to set timeout on client sock.");
+    }
+
     /* Spawn thread for Node::main() */
     /* NOTE: This is done last to ensure all worker sockets have been created */
     /* FIXME: Make this (and everything else) thread safe. */
@@ -330,7 +340,7 @@ void* Node::main(void* arg)
         }
 
         /* Activity on client command socket */
-        if (pollItems[CLIENT_CMD].revents  & POLLIN){
+        if (pollItems[CLIENT_CMD].revents & POLLIN){
             bytesRead = recv(pollItems[CLIENT_CMD].fd, buf, bufSize, 0);
             if (bytesRead < sizeof(msg_header_t)){
                 perror("Unexpected message size from client cmd socket.");
@@ -339,6 +349,22 @@ void* Node::main(void* arg)
             }
 
             logMsg("Manager got message from client cmd socket.");
+
+            msg_header_t* msgHeader = static_cast<msg_header_t*>(buf);
+            switch (msgHeader->msgType){
+                case MSG_TYPE_THREAD_SHUTDOWN:
+                    /* TODO: Write this */
+                    break;
+
+                case MSG_TYPE_PUT_DATA_REQ:
+                case MSG_TYPE_GET_DATA_REQ:
+                    /* Forward client request to appropriate worker */
+
+
+                default:
+                    /* Unrecognized msg type */
+                    break;
+            }
             /* TODO: Write this */
         }
     }
@@ -898,11 +924,29 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
 
     send(this->clientSock, putMsg, msgSize, 0);
 
-    /* FIXME: Is this waiting for ACK or success/fail confirmation?
-     * FIXME: Also needs TIMEOUT */
+    /* FIXME: Is this waiting for ACK or success/fail confirmation? */
     ssize_t bytesRead;
     worker_put_rep_msg_t reply;
     bytesRead = recv(this->clientSock, &reply, sizeof(reply), 0);
+    if(bytesRead < 0){
+        if (errno == EAGAIN || errno == EWOULDBLOCK){
+            /* Timeout occured */
+            logMsg("Client request timed out.");
+            return -1;
+        }
+        else{
+            perror("Client failed to receive reply.");
+            return -1;
+        }
+    }
+    if(bytesRead == 0){
+        perror("Client to manager socket is disconnected.");
+        return -1;
+    }
+    if (bytesRead < sizeof(worker_get_rep_msg_t)){
+        perror("Client received unexpected message size instead of put reply.");
+        return -1;
+    }
     /* FIXME: Flush buffer if reply message larger than expected? */
 
     /* TODO: Confirm result matches request? */
@@ -1023,8 +1067,29 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
         return -1;
     }
     ssize_t bytesRead;
+
     bytesRead = recv(this->clientSock, getRep, MAX_MSG_SIZE, 0);
+    if(bytesRead < 0){
+        if (errno == EAGAIN || errno == EWOULDBLOCK){
+            /* Timeout occured */
+            logMsg("Client request timed out.");
+            return -1;
+        }
+        else{
+            perror("Client failed to receive reply.");
+            return -1;
+        }
+    }
+    if(bytesRead == 0){
+        perror("Client to manager socket is disconnected.");
+        return -1;
+    }
+    if (bytesRead < sizeof(worker_get_rep_msg_t)){
+        perror("Client received unexpected message size instead of get reply.");
+        return -1;
+    }
     /* FIXME: I'm sure some more checks are needed here */
+    /* FIXME: Flush buffer if reply message larger than expected? */
 
     /* Check validity */
     value_t response;
