@@ -16,7 +16,7 @@
 
 /* Local helper function declarations -- definitions at end of file */
 void print_digest(digest_t digest);
-std::string peerArrayToIP(char *ip, size_t ip_len);
+std::string ipCharArrayToStr(char *ip, size_t ip_len);
 int logMsg(std::string msg);
 int checkConsensus(value_t* responses, int responseCnt, value_t* answer);
 int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t* answer);
@@ -132,8 +132,9 @@ int Node::startup() {
     }
     pthread_barrier_wait(&workerBarrier);
 
-    /* Connect client CMD socket */
-
+    pthread_barrier_destroy(&workerBarrier);
+    pthread_barrier_destroy(&mainBarrier);
+    logMsg("Node startup complete.");
     return 0;
 }
 
@@ -184,7 +185,7 @@ void* Node::main(void* arg)
     hints.ai_socktype = SOCK_DGRAM;
     hints.ai_flags = AI_PASSIVE;
 
-    rv = getaddrinfo(nullptr, PORT, &hints, &srvinfo);
+    rv = getaddrinfo(nullptr, PORT_STR, &hints, &srvinfo);
     if (rv != 0){
         perror("Getaddrinfo failed.");
     }
@@ -247,7 +248,9 @@ void* Node::main(void* arg)
 
         // Activity on srvSock
         if (pollItems[NETWORK_SRV].revents & POLLIN){
-            bytesRead = recvfrom(srvSock, buf, bufSize, 0, (sockaddr*) &fromAddr, &fromLen);
+            fromLen = sizeof(fromAddr);
+            bytesRead = recvfrom(srvSock, buf, bufSize, 0,
+                                 (sockaddr*) &fromAddr, &fromLen);
             if (bytesRead < sizeof(msg_header_t)){
                 /* All messages should contain a header at minimum */
                 continue;
@@ -307,7 +310,7 @@ void* Node::main(void* arg)
                     send(tempWorker.sock, &newJob, sizeof(newJob), 0);
 
                     /* Send actual message */
-                    send(tempWorker.sock, &buf, (size_t) bytesRead, 0);
+                    send(tempWorker.sock, buf, (size_t) bytesRead, 0);
 
                     /* Update available/busy workers vectors */
                     availableWorkers.pop_back();
@@ -322,7 +325,7 @@ void* Node::main(void* arg)
         }
 
         /* Activity on workerSock */
-        for(i = 0; i < INIT_WORKER_THREAD_CNT; i++) {
+        for(i = WORKER_0; i < INIT_WORKER_THREAD_CNT + WORKER_0; i++) {
             if (pollItems[i].revents & POLLIN) {
                 /* Read message from worker */
                 bytesRead = recv(pollItems[i].fd, buf, bufSize, 0);
@@ -357,9 +360,42 @@ void* Node::main(void* arg)
                     break;
 
                 case MSG_TYPE_PUT_DATA_REQ:
-                case MSG_TYPE_GET_DATA_REQ:
+                case MSG_TYPE_GET_DATA_REQ: {
                     /* Forward client request to appropriate worker */
+                    if (availableWorkers.size() == 0) {
+                        /* FIXME: How to handle this? */
+                        logMsg("All workers busy. Dropping request.");
+                        break;
+                    }
 
+                    /* Configure tempWorker */
+                    worker_t tempWorker;
+                    tempWorker.sock = availableWorkers.back();
+                    if (msgHeader->msgType == MSG_TYPE_PRE_PREPARE) {
+                        /* Start of PBFT exchange. Store digest (key) */
+                        worker_pre_prepare_t *clientMsg;
+                        clientMsg = static_cast<worker_pre_prepare_t *>(buf);
+                        tempWorker.currentKey = clientMsg->digest;
+                    }
+
+                    /* Send start of new job message to appropriate worker */
+                    /* FIXME: How to tell worker to respond to client instead of network? */
+                    worker_new_job_msg_t newJob;
+                    memset(&newJob, 0, sizeof(newJob));
+                    ssize_t bytesSent;
+                    bytesSent = send(tempWorker.sock, &newJob, sizeof(newJob), 0);
+                    if(bytesSent){
+                        bytesSent = 1;
+                    }
+
+                    /* Send actual message */
+                    send(tempWorker.sock, buf, (size_t) bytesRead, 0);
+
+                    /* Update available/busy workers vectors */
+                    availableWorkers.pop_back();
+                    busyWorkers.push_back(tempWorker);
+                    break;
+                }
 
                 default:
                     /* Unrecognized msg type */
@@ -379,16 +415,21 @@ void* Node::main(void* arg)
 void* Node::workerMain(void* arg)
 {
     /* FIXME: Convert to standard UDP sockets */
-    /* Copy arg data then free arg pointer */
+    /* Copy arg data since args not valid after calling pthread_barrier_wait */
     auto args = static_cast<worker_arg_t*>(arg);
     Node* context = static_cast<Node*>(args->node);
     int id = args->id;
     int managerSock = args->managerSock;
 
+    /* Setup polling struct for managerSock */
+    pollfd managerSockPoll;
+    managerSockPoll.fd = managerSock;
+    managerSockPoll.events = POLLIN;
+
     /* Allocate memory for buffer */
     void *buf;
     size_t bufSize = 0;
-    ssize_t bytesRead;
+    ssize_t bytesRead, bytesSent;
 
     buf = malloc(MAX_MSG_SIZE);
     if (buf == nullptr){
@@ -398,11 +439,28 @@ void* Node::workerMain(void* arg)
         bufSize = MAX_MSG_SIZE;
     }
 
+    /* Setup UDP socket for outgoing messages */
+    int outSock, rv, i;
+    sockaddr_in outAddr[DHT_REPLICATION];
+    socklen_t outAddrLen;
+
+    outSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (outSock < 0){
+        perror("Worker failed to create outbound socket.");
+    }
+
+    memset(outAddr, 0, sizeof(sockaddr_in) * DHT_REPLICATION);
+    for ( i = 0; i < DHT_REPLICATION; i++){
+        outAddr[i].sin_family = AF_INET;
+        outAddr[i].sin_port = htons(PORT);
+    }
+    outAddrLen = sizeof(sockaddr_in);
+
     /* Notify manager we are ready */
     std::string tempStr;
     tempStr = "READY";
     bytesRead = (tempStr.length() < bufSize)? tempStr.length() : bufSize;
-    strncpy((char*)buf, tempStr.c_str(), bytesRead);
+    strncpy((char*)buf, tempStr.c_str(), (size_t) bytesRead);
     send(managerSock, buf, (size_t) bytesRead, 0);
 
     std::string logstr = "Worker started with id ";
@@ -412,474 +470,564 @@ void* Node::workerMain(void* arg)
     /* Signal init complete */
     pthread_barrier_wait(args->barrier);
 
-    int running = true, sendDone = true, result, success;
+    int running = true, sendDone = true, success;
+    worker_new_job_msg_t newJobMsg;
+    msg_header_t *msgHeader;
     while(running) {
         logMsg("Worker listening for message");
 
-        /* Recv new job msg */
+        /* Recv and store new job msg */
         bytesRead = recv(managerSock, buf, bufSize, 0);
         if (bytesRead != sizeof(worker_new_job_msg_t)){
             perror("Worker received unexpected message at job start.");
             /* FIXME: flush queue? */
             continue;
         }
+        newJobMsg = *(static_cast<worker_new_job_msg_t*>(buf));
 
-//        /* Recv empty frame, followed by client id */
-//        brokerSock->recv(&msg);
-//        if(msg.size() != 0){
-//            logMsg("Worker received invalid message format. Dropping message.");
-//            continue;
-//        }
-//        zmq_id_t clientID = z_recv_id(brokerSock, ZMQ_NULL);
-//
-//        /* Data frame */
-//        brokerSock->recv(&msg);
-//        memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-//
-//        logstr = "Worker ";
-//        logstr.append(std::to_string(id));
-//        logstr.append(" received message. Type: ");
-//        logstr.append(std::to_string(msgHeader.msgType));
-//        logMsg(logstr);
-//
-//        /* NOTE: some of the case statements are given their own scope {}
-//         *       this is to allow different message type variables to be declared
-//         *       depending on the type of message received */
-//        switch (msgHeader.msgType) {
-//
-//            case MSG_TYPE_THREAD_SHUTDOWN:
-//                logMsg("Worker shutting down");
-//                running = false;
-//                /* FIXME: Do any cleanup here */
-//                delete brokerSock;
-//                break;
-//
-//            case MSG_TYPE_PRE_PREPARE: {
-//                logMsg("Handling pre-prepare message");
-//                success = false;
-//                size_t dataSize = msg.size() - sizeof(worker_pre_prepare_t);
-//                worker_pre_prepare_t *ppMsg = (worker_pre_prepare_t *) malloc(msg.size());
-//                if (ppMsg == nullptr) {
-//                    /* FIXME: Handle error condition */
-//                    break;
-//                }
-//                memcpy(ppMsg, msg.data(), msg.size());
-//
-//                /* Send out the prepare messages */
-//                worker_prepare_t *pMsg = (worker_prepare_t *) malloc(msg.size() - 3*MSG_TOPIC_SIZE);
-//                size_t prepareSize = sizeof(worker_prepare_t) + dataSize;
-//                memcpy(pMsg->data,ppMsg->data,dataSize);
-//                pMsg->digest = ppMsg->digest;
-//                pMsg->msgType = MSG_TYPE_PREPARE;
-//                for (int i = 0; i < reqSockCnt - 1; i++){
-//                    logMsg("Sending prepare message");
-//                    tempAddr = NETWORK_PROTOCOL;
-//                    tempAddr += peerArrayToIP(ppMsg->peers[i], IP_ADDR_SIZE);
-//                    tempAddr += ':';
-//                    tempAddr += PORT;
-//                    reqSock[i].sock->connect(tempAddr.c_str());
-//                    reqSock[i].curEndpoint = tempAddr;
-//
-//                    /* FIXME: TOPIC no longer needed */
-//                    memcpy(pMsg->msgTopic,ppMsg->peers[i],MSG_TOPIC_SIZE);
-//                    zmq::message_t tempMsg(prepareSize);
-//                    memcpy(tempMsg.data(), pMsg, prepareSize);
-//                    reqSock[i].sock->send(tempMsg);
-//                }
-//
-//                /*Collect incoming prepare messages*/
-//                table_entry_t prepMessages[DHT_REPLICATION];
-//                prepMessages[0].digest = pMsg->digest;
-//                prepMessages[0].data_size = dataSize;
-//                prepMessages[0].data_ptr = pMsg->data;
-//
-//                int num_responses = 1;
-//                while (num_responses < DHT_REPLICATION) {
-//                    // Poll on all req sockets
-//                    result = zmq_poll(&brokerSockPoll, 1, DEFAULT_TIMEOUT_MS);
-//
-//                    if (result == 0){
-//                        // Timeout occured
-//                        /* TODO: Gracefully handle timeout */
-//                        logMsg("Timeout occurred waiting for prepare messages");
-//                    }
-//
-//                    /* FIXME: Make sure each peer only replies once */
-//                    if (brokerSockPoll.revents > 0){
-//                        brokerSock->recv(&msg);
-//
-//                        memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-//                        if (msgHeader.msgType == MSG_TYPE_PREPARE) {
-//                            logMsg("Storing a prepare message");
-//                            dataSize = msg.size() - sizeof(worker_prepare_t);
-//                            prepMessages[num_responses].digest = ((worker_prepare_t *)msg.data())->digest;
-//                            prepMessages[num_responses].data_size = dataSize;
-//                            prepMessages[num_responses].data_ptr = malloc(dataSize);
-//                            memcpy(prepMessages[num_responses].data_ptr,((worker_prepare_t *)msg.data())->data,dataSize);
-//
-//                            num_responses++;
-//                        } else {
-//                            logMsg("Throwing away a non-prepare message");
-//                        }
-//                    }
-//                }
-//
-//                table_entry_t prepareResult;
-//                /*Consensus happens here, produces a message to commit*/
-//                /* FIXME: 4 is a magic number */
-//                if (checkEntryConsensus(prepMessages,4,&prepareResult) == 0){
-//                    size_t commitSize = sizeof(worker_commit_t) + prepareResult.data_size;
-//                    worker_commit_t *cMsg = (worker_commit_t *) malloc(commitSize);
-//                    memcpy(cMsg->data,prepareResult.data_ptr,prepareResult.data_size);
-//                    cMsg->digest = prepareResult.digest;
-//                    cMsg->msgType = MSG_TYPE_COMMIT;
-//
-//                    for (int i = 0; i < reqSockCnt - 1; i++){
-//                        logMsg("Sending commit message");
-//                        /* FIXME: Topic no longer needed */
-//                        memcpy(cMsg->msgTopic,ppMsg->peers[i],MSG_TOPIC_SIZE);
-//
-//                        zmq::message_t tempMsg(commitSize);
-//                        memcpy(tempMsg.data(), cMsg, commitSize);
-//                        reqSock[i].sock->send(tempMsg);
-//                    }
-//
-//                    table_entry_t commitMessages[DHT_REPLICATION];
-//                    commitMessages[0].digest = cMsg->digest;
-//                    commitMessages[0].data_size = dataSize;
-//                    commitMessages[0].data_ptr = cMsg->data;
-//
-//                    int num_responses = 1;
-//                    while (num_responses < DHT_REPLICATION) {
-//                        // Poll on all req sockets
-//                        result = zmq_poll(&brokerSockPoll, 1, DEFAULT_TIMEOUT_MS);
-//
-//                        if (result == 0){
-//                            // Timeout occured
-//                            /* TODO: Gracefully handle timeout */
-//                            logMsg("Timeout occurred waiting for commit messages");
-//                        }
-//
-//                        /* FIXME: Make sure each peer only replies once */
-//                        if(brokerSockPoll.revents > 0) {
-//                            brokerSock->recv(&msg);
-//                            memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-//                            if (msgHeader.msgType == MSG_TYPE_COMMIT) {
-//                                logMsg("Storing a commit message");
-//                                dataSize = msg.size() - sizeof(worker_commit_t);
-//                                commitMessages[num_responses].digest = ((worker_commit_t *) msg.data())->digest;
-//                                commitMessages[num_responses].data_size = dataSize;
-//                                commitMessages[num_responses].data_ptr = malloc(dataSize);
-//                                memcpy(commitMessages[num_responses].data_ptr,
-//                                       ((worker_commit_t *) msg.data())->data,
-//                                       dataSize);
-//
-//                                num_responses++;
-//                            } else {
-//                                logMsg("Throwing away a non-commit message");
-//                            }
-//                        }
-//
-//                        table_entry_t commitResult;
-//                        if (checkEntryConsensus(commitMessages,4,&commitResult) == 0) {
-//                            logMsg("Storing data...");
-//                            context->localPut(commitResult.digest, commitResult.data_ptr, commitResult.data_size);
-//                            success = true;
-//                            for (i = 0; i < DHT_REPLICATION; i++) {free(commitMessages[i].data_ptr);}
-//                        } else {
-//                            std::cout << "ERROR: Commit Consensus Failed! Aborting..." << std::endl;
-//                            break;
-//                        }
-//                    }
-//                    free(cMsg);
-//
-//                    /* Done with request sockets. Disconnect them */
-//                    for(i = 0; i < reqSockCnt - 1; i++){
-//                        reqSock[i].sock->disconnect((reqSock[i].curEndpoint).c_str());
-//                        reqSock[i].curEndpoint = "";
-//                    }
-//
-//                } else {
-//                    std::cout << "ERROR: Prepare Consensus Failed! Aborting..." << std::endl;
-//                    free(pMsg);
-//                    free(ppMsg);
-//                    for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
-//                    break;
-//                }
-//
-//                //worker_commit_t *cMsg = (worker_commit_t *) malloc
-//                std::cout << "Finished storing data." << std::endl;
-//                free(pMsg);
-//                free(ppMsg);
-//                for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
-//                break;
-//
-//                // Send reply to pre-prepare originating node
-//                zmq::message_t replyMsg(sizeof(worker_put_rep_msg_t));
-//                worker_put_rep_msg_t reply;
-//                if(success){
-//                    reply.result = true;
-//                }
-//                else{
-//                    reply.result = false;
-//                }
-//                memcpy(replyMsg.data(), &reply, sizeof(worker_put_rep_msg_t));
-//
-//                /* Send back reply */
-//                z_send_id(brokerSock, clientID);
-//                brokerSock->send(replyMsg);
-//
-//            }
-//
-//
-//            case MSG_TYPE_GET_DATA_FWD: {
-//                logMsg("Handling get_fwd message");
-//                if (msg.size() < sizeof(worker_get_fwd_msg_t)) {
-//                    /* FIXME: Handle error condition */
-//                    break;
-//                }
-//
-//                worker_get_fwd_msg_t *getMsg = static_cast<worker_get_fwd_msg_t*>(msg.data());
-//                /* localGet returns pointer to data in hash table and its size */
-//                int dataSize;
-//                void *data;
-//                context->localGet(getMsg->digest, &data, &dataSize);
-//
-//                size_t repSize = sizeof(worker_get_rep_msg_t) + dataSize;
-//                worker_get_rep_msg_t *repMsg = (worker_get_rep_msg_t *) malloc(repSize);
-//
-//                /* FIXME: Topic no longer used */
-//                memcpy(repMsg->msgTopic, getMsg->sender, MSG_TOPIC_SIZE);
-//
-//                repMsg->msgType = MSG_TYPE_GET_DATA_REP;
-//                repMsg->digest = getMsg->digest;
-//                memcpy(repMsg->data,data,dataSize);
-//
-//                zmq::message_t tempMsg(repSize);
-//                memcpy(tempMsg.data(), repMsg, repSize);
-//
-//                /* Send back reply */
-//                z_send_id(brokerSock, clientID);
-//                brokerSock->send(tempMsg);
-//
-//                free(repMsg);
-//                free(data);
-//                break;
-//            }
-//
-//            case MSG_TYPE_PUT_DATA_REQ: {
-//                logMsg("Worker starting put request.");
-//
-//                if (msg.size() < sizeof(worker_put_req_msg_t)) {
-//                    /* FIXME: Handle error condition */
-//                    break;
-//                }
-//
-//                worker_put_req_msg_t *putMsg = (worker_put_req_msg_t *) malloc(msg.size());
-//                if (putMsg == nullptr) {
-//                    /* FIXME: Handle error condition */
-//                    break;
-//                }
-//                memcpy(putMsg, msg.data(), msg.size());
-//
-//                logMsg("Worker put request started.");
-//
-//                /* FIXME: Topic no longer used, but do need to find who to send to */
-//                char targetTopic[MSG_TOPIC_SIZE];
-//                char tempTopic[MSG_TOPIC_SIZE];
-//                std::string tempAddr;
-//                memcpy(targetTopic,context->myTopic,3);
-//                targetTopic[3] = (char)((((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES)+context->myTopic[3]);
-//                memcpy(tempTopic,targetTopic,4);
-//                size_t ppSize = msg.size() + 3*MSG_TOPIC_SIZE;
-//                worker_pre_prepare_t *prePrepareMsg = (worker_pre_prepare_t *) malloc(ppSize);
-//                prePrepareMsg->msgType = MSG_TYPE_PRE_PREPARE;
-//                size_t dataSize = msg.size() - sizeof(worker_put_req_msg_t);
-//
-//                int peerCnt = 0;
-//                int targetIp;
-//                for (int i = 0; i < DHT_REPLICATION; i++) {
-//                    logMsg("Creating a pre-prepare message");
-//                    targetIp = (int)targetTopic[3] + i;
-//                    if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
-//                    tempTopic[3] = (char)targetIp;
-//                    memcpy(prePrepareMsg->msgTopic,tempTopic,4);
-//                    for (int j = 0; j < DHT_REPLICATION; j++) {
-//                        if (i == j) continue;
-//                        targetIp = (int)targetTopic[3] + j;
-//                        if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
-//                        tempTopic[3] = (char)targetIp;
-//                        memcpy(prePrepareMsg->peers[peerCnt],tempTopic,4);
-//                        peerCnt++;
-//                    }
-//                    peerCnt = 0;
-//                    prePrepareMsg->digest = putMsg->digest;
-//                    mempcpy(prePrepareMsg->data, putMsg->data, dataSize);
-//                    zmq::message_t tempMsg(ppSize);
-//                    memcpy(tempMsg.data(), prePrepareMsg, ppSize);
-//
-//                    tempAddr = NETWORK_PROTOCOL;
-//                    tempAddr += peerArrayToIP(prePrepareMsg->msgTopic, IP_ADDR_SIZE);
-//                    tempAddr += ":";
-//                    tempAddr += PORT;
-//                    reqSock[i].sock->connect(tempAddr.c_str());
-//                    reqSock[i].curEndpoint = tempAddr;
-//                    reqSock[i].sock->send(tempMsg);
-//                }
-//
-//                /* FIXME: Wait on reply and do something with it */
-//                int numResponses = 0;
-//                while(numResponses < DHT_REPLICATION){
-//                    result = zmq_poll(reqSockPoll, reqSockCnt, DEFAULT_TIMEOUT_MS);
-//
-//                    if (result == 0){
-//                        // Timeout occured
-//                        /* TODO: Gracefully handle timeout */
-//                        logMsg("Timeout occurred waiting for put request responses.");
-//                        break;
-//                    }
-//
-//                    for(i = 0; i < reqSockCnt; i++){
-//                        if(reqSockPoll[i].revents > 0) {
-//                            (static_cast<zmq::socket_t*> (reqSockPoll[i].socket))->recv(&msg);
-//                            memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-//                            if (msgHeader.msgType == MSG_TYPE_PUT_DATA_REP) {
-//                                /* FIXME: Gather responses */
-//                                numResponses++;
-//                            }
-//                            else{
-//                                logMsg("Throwing away a non-reply message");
-//                            }
-//                        }
-//                    }
-//                }
-//
-//                /* Disconnect request sockets */
-//                for(i = 0; i < reqSockCnt; i++){
-//                    reqSock[i].sock->disconnect(reqSock[i].curEndpoint.c_str());
-//                    reqSock->curEndpoint = "";
-//                }
-//
-//                /* TODO: Evaluate responses and send data back to client here */
-//                zmq::message_t replyMsg(sizeof(worker_put_rep_msg_t));
-//                worker_put_rep_msg_t putReply;
-//                memcpy(replyMsg.data(), &putReply, sizeof(worker_put_rep_msg_t));
-//
-//                /* Send back reply */
-//                z_send_id(brokerSock, clientID);
-//                brokerSock->send(replyMsg);
-//
-//                //context->localPut(putMsg->digest, putMsg->data, dataSize);
-//                /* localPut blocks until message is stored in hash table. */
-//                /* Safe to free memory at this point */
-//                free(putMsg);
-//                free(prePrepareMsg);
-//                sendDone = 0;
-//                break;
-//            }
-//
-//            /* FIXME: Shouldn't get message always be fixed size? */
-//            case MSG_TYPE_GET_DATA_REQ: {
-//                logMsg("Worker get request started.");
-//
-//                if (msg.size() < sizeof(worker_get_req_msg_t)) {
-//                    /* FIXME: Handle error condition */
-//                    break;
-//                }
-//
-//                worker_get_req_msg_t *getMsg = (worker_get_req_msg_t *) malloc(msg.size());
-//                if (getMsg == nullptr) {
-//                    /* FIXME: Handle error condition */
-//                    break;
-//                }
-//                memcpy(getMsg, msg.data(), msg.size());
-//
-//                char targetTopic[MSG_TOPIC_SIZE];
-//                char tempTopic[MSG_TOPIC_SIZE];
-//                memcpy(targetTopic,context->myTopic,3);
-//                targetTopic[3] = (char)((((int)getMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES)+1);
-//                memcpy(tempTopic,targetTopic,4);
-//                size_t gfSize = sizeof(worker_get_fwd_msg_t);
-//                worker_get_fwd_msg_t *getFwdMsg = (worker_get_fwd_msg_t *) malloc(gfSize);
-//                getFwdMsg->msgType = MSG_TYPE_GET_DATA_FWD;
-//                getFwdMsg->digest = getMsg->digest;
-//
-//
-//                int targetIp;
-//                for (int i = 0; i < DHT_REPLICATION; i++) {
-//                    logMsg("Creating a get message.");
-//
-//                    targetIp = (int)targetTopic[3] + i;
-//                    if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
-//                    tempTopic[3] = (char)targetIp;
-//                    memcpy(getFwdMsg->msgTopic,tempTopic,4);
-//
-//                    zmq::message_t tempMsg(gfSize);
-//                    memcpy(tempMsg.data(), getFwdMsg, gfSize);
-//
-//                    std::string tempAddr;
-//                    tempAddr = NETWORK_PROTOCOL;
-//                    tempAddr += peerArrayToIP(tempTopic, IP_ADDR_SIZE);
-//                    tempAddr += ":";
-//                    tempAddr += PORT;
-//                    reqSock[i].curEndpoint = tempAddr;
-//                    reqSock[i].sock->connect(tempAddr.c_str());
-//                    reqSock[i].sock->send(tempMsg);
-//                }
-//
-//                /* FIXME: Wait on reply and do something with it */
-//                int numResponses = 0;
-//                while(numResponses < DHT_REPLICATION){
-//                    result = zmq_poll(reqSockPoll, reqSockCnt, DEFAULT_TIMEOUT_MS);
-//
-//                    if (result == 0){
-//                        // Timeout occured
-//                        /* TODO: Gracefully handle timeout */
-//                        logMsg("Timeout occurred waiting for put request responses.");
-//                        break;
-//                    }
-//
-//                    for(i = 0; i < reqSockCnt; i++){
-//                        if(reqSockPoll[i].revents > 0) {
-//                            (static_cast<zmq::socket_t*> (reqSockPoll[i].socket))->recv(&msg);
-//                            memcpy(&msgHeader, msg.data(), sizeof(msgHeader));
-//                            if (msgHeader.msgType == MSG_TYPE_GET_DATA_REP) {
-//                                /* FIXME: Gather responses */
-//                                numResponses++;
-//                            }
-//                            else{
-//                                logMsg("Throwing away a non-reply message");
-//                            }
-//                        }
-//                    }
-//                }
-//
-//                /* Disconnect request sockets */
-//                for(i = 0; i < reqSockCnt; i++){
-//                    reqSock[i].sock->disconnect(reqSock[i].curEndpoint.c_str());
-//                    reqSock->curEndpoint = "";
-//                }
-//
-//                /* TODO: Evaluate responses and send data back to client here */
-//                zmq::message_t replyMsg(sizeof(worker_get_rep_msg_t));
-//                worker_get_rep_msg_t getReply;
-//                memcpy(replyMsg.data(), &getReply, sizeof(worker_get_rep_msg_t));
-//
-//                /* Send back reply */
-//                z_send_id(brokerSock, clientID);
-//                brokerSock->send(replyMsg);
-//
-//                /* localGet blocks until message is retrieved from hash table. */
-//                /* Safe to free memory at this point */
-//                free(getMsg);
-//                free(getFwdMsg);
-//                break;
-//            }
-//
-//            default:
-//                /* FIXME: Unrecognized message error */
-//                break;
-//        } /* End switch MSG_TYPE */
+        /* Recv job data */
+        bytesRead = recv(managerSock, buf, bufSize, 0);
+        if (bytesRead < sizeof(msg_header_t)){
+            perror("Worker received unexpected message size for job data.");
+            /* FIXME: flush queue? */
+            continue;
+        }
+        msgHeader = static_cast<msg_header_t*>(buf);
+
+        logstr = "Worker ";
+        logstr.append(std::to_string(id));
+        logstr.append(" received message. Type: ");
+        logstr.append(std::to_string(msgHeader->msgType));
+        logMsg(logstr);
+
+        /* NOTE: some of the case statements are given their own scope {}
+         *       this is to allow different message type variables to be declared
+         *       depending on the type of message received */
+        switch (msgHeader->msgType) {
+
+            case MSG_TYPE_THREAD_SHUTDOWN:
+                logMsg("Worker shutting down");
+                running = false;
+                /* FIXME: Do any cleanup here */
+                free(buf);
+                close(managerSock);
+                break;
+
+            case MSG_TYPE_PRE_PREPARE: {
+                /* FIXME: Cleanup memory management. Minimize use of malloc */
+                logMsg("Handling pre-prepare message");
+                success = false;
+                size_t dataSize = bytesRead - sizeof(worker_pre_prepare_t);
+                worker_pre_prepare_t *ppMsg = (worker_pre_prepare_t *) malloc((size_t) bytesRead);
+                if (ppMsg == nullptr) {
+                    /* FIXME: Handle error condition */
+                    break;
+                }
+                memcpy(ppMsg, buf, (size_t) bytesRead);
+
+                /* Setup peer addresses */
+                std::string peerIP;
+                for (i = 0; i < DHT_REPLICATION - 1; i++){
+                    peerIP = ipCharArrayToStr(ppMsg->peers[i], IP_ADDR_SIZE);
+                    rv = inet_aton(peerIP.c_str(), &(outAddr[i].sin_addr));
+                    if (rv == 0){
+                        perror("inet_aton() failed interpreting peer IP.");
+                        break;
+                    }
+                }
+
+                /* Construct prepare messages */
+                worker_prepare_t *pMsg;
+                size_t prepareSize = sizeof(worker_prepare_t) + dataSize;
+                pMsg = (worker_prepare_t *) malloc(prepareSize);
+                if (pMsg == nullptr){
+                    perror("Worker failed to allocate memory for prepare message.");
+                    break;
+                }
+                memcpy(pMsg->data, ppMsg->data, dataSize);
+                pMsg->digest = ppMsg->digest;
+                pMsg->msgType = MSG_TYPE_PREPARE;
+
+                /* Send prepare messages */
+                for (i = 0; i < DHT_REPLICATION - 1; i++){
+                    logMsg("Sending prepare message");
+                    bytesSent = sendto(outSock, pMsg, prepareSize, 0,
+                                       (sockaddr*) &(outAddr[i]), outAddrLen);
+                    if (bytesSent < 0) {
+                        perror("Worker failed sending out prepare message.");
+                        continue;
+                    }
+                }
+
+                /*Collect incoming prepare messages*/
+                table_entry_t prepMessages[DHT_REPLICATION];
+                prepMessages[0].digest = pMsg->digest;
+                prepMessages[0].data_size = dataSize;
+                prepMessages[0].data_ptr = pMsg->data;
+
+                int num_responses = 1;
+                sockaddr_storage repAddr[DHT_REPLICATION - 1];
+                socklen_t  repAddrLen[DHT_REPLICATION - 1];
+                while (num_responses < DHT_REPLICATION) {
+                    // Poll on all req sockets
+                    rv = poll(&managerSockPoll, 1, DEFAULT_TIMEOUT_MS);
+                    if (rv == 0){
+                        // Timeout occured
+                        /* TODO: Gracefully handle timeout */
+                        logMsg("Timeout occurred waiting for prepare messages");
+                        break;
+                    }
+                    if (rv < 0){
+                        perror("Worker encountered error while polling manager socket.");
+                        break;
+                    }
+
+                    /* FIXME: Make sure each peer only replies once */
+                    if (managerSockPoll.revents & POLLIN){
+                        /* Read incoming message and check validity */
+                        bytesRead = recv(managerSock, buf, bufSize, MSG_DONTWAIT);
+                        if (bytesRead < 0){
+                            if(errno == EAGAIN || errno == EWOULDBLOCK){
+                                /* No message ready */
+                                logMsg("Worker tried to read empty buffer on manager socket.");
+                                break;
+                            }
+                            else{
+                                perror("Worker encountered error receiving from manager socket.");
+                                break;
+                            }
+                        }
+                        else if (bytesRead < sizeof(worker_commit_t)){
+                            perror("Worker received undersized message instead of prepare message.");
+                            break;
+                        }
+
+                        msg_header_t *tempHeader;
+                        tempHeader = static_cast<msg_header_t*>(buf);
+                        if (tempHeader->msgType == MSG_TYPE_PREPARE) {
+                            logMsg("Storing a prepare message");
+                            worker_prepare_t *tempPrepare = static_cast<worker_prepare_t*>(buf);
+                            dataSize = bytesRead - sizeof(worker_prepare_t);
+                            prepMessages[num_responses].digest = tempPrepare->digest;
+                            prepMessages[num_responses].data_size = dataSize;
+                            prepMessages[num_responses].data_ptr = malloc(dataSize);
+                            if (prepMessages[num_responses].data_ptr == nullptr){
+                                perror("Worker failed to allocate memory for incoming prepare message.");
+                                break;
+                            }
+                            memcpy(prepMessages[num_responses].data_ptr, tempPrepare->data, dataSize);
+
+                            num_responses++;
+                        } else {
+                            logMsg("Throwing away a non-prepare message");
+                        }
+                    }
+                }
+
+                if (num_responses < DHT_REPLICATION - 1){
+                    /* FIXME: What else needs to happen here? */
+                    logMsg("Worker did not receive enough prepare messages.");
+                    break;
+                }
+
+                table_entry_t prepareResult;
+                /*Consensus happens here, produces a message to commit*/
+                rv = checkEntryConsensus(prepMessages, num_responses, &prepareResult);
+                if (rv == 0){
+                    size_t commitSize = sizeof(worker_commit_t) + prepareResult.data_size;
+                    if (commitSize > bufSize){
+                        perror("Worker commit message size exceeds maximum buffer size.");
+                        break;
+                    }
+                    worker_commit_t *cMsg = static_cast<worker_commit_t*>(buf);
+                    memcpy(cMsg->data, prepareResult.data_ptr, prepareResult.data_size);
+                    cMsg->digest = prepareResult.digest;
+                    cMsg->msgType = MSG_TYPE_COMMIT;
+
+                    for (i = 0; i < DHT_REPLICATION - 1; i++){
+                        logMsg("Sending commit message");
+                        /* FIXME: Topic no longer needed */
+                        memcpy(cMsg->msgTopic,ppMsg->peers[i],MSG_TOPIC_SIZE);
+
+                        bytesSent = sendto(outSock, cMsg, commitSize, 0,
+                                           (sockaddr*) &(outAddr[i]), outAddrLen);
+                    }
+
+                    table_entry_t commitMessages[DHT_REPLICATION];
+                    commitMessages[0].digest = cMsg->digest;
+                    commitMessages[0].data_size = dataSize;
+                    commitMessages[0].data_ptr = cMsg->data;
+
+                    /* Wait for incoming commit messages */
+                    int num_responses = 1;
+                    sockaddr_storage repAddr[DHT_REPLICATION - 1];
+                    socklen_t  repAddrLen[DHT_REPLICATION - 1];
+                    while (num_responses < DHT_REPLICATION) {
+                        rv = poll(&managerSockPoll, 1, DEFAULT_TIMEOUT_MS);
+                        if (rv == 0){
+                            // Timeout occured
+                            /* TODO: Gracefully handle timeout */
+                            logMsg("Timeout occurred waiting for commit messages");
+                            break;
+                        }
+                        if (rv < 0){
+                            perror("Worker encountered error while polling manager socket.");
+                            break;
+                        }
+
+                        /* FIXME: Make sure each peer only replies once */
+                        if(managerSockPoll.revents & POLLIN) {
+                            bytesRead = recv(managerSock, buf, bufSize, MSG_DONTWAIT);
+                            if (bytesRead < 0){
+                                if(errno == EAGAIN || errno == EWOULDBLOCK){
+                                    /* No message ready */
+                                    logMsg("Worker tried to read empty buffer on manager socket.");
+                                    break;
+                                }
+                                else{
+                                    perror("Worker encountered error receiving from manager socket.");
+                                    break;
+                                }
+                            }
+                            else if (bytesRead < sizeof(worker_commit_t)){
+                                perror("Worker received undersized message instead of commit message.");
+                                break;
+                            }
+
+                            msg_header_t *tempHeader;
+                            tempHeader = static_cast<msg_header_t*>(buf);
+                            if (tempHeader->msgType == MSG_TYPE_COMMIT) {
+                                logMsg("Storing a commit message");
+                                worker_commit_t *tempCommit = static_cast<worker_commit_t*>(buf);
+                                dataSize = bytesRead - sizeof(worker_commit_t);
+                                commitMessages[num_responses].digest = tempCommit->digest;
+                                commitMessages[num_responses].data_size = dataSize;
+                                commitMessages[num_responses].data_ptr = malloc(dataSize);
+                                if (commitMessages[num_responses].data_ptr == nullptr){
+                                    perror("Worker failed to allocate memory for incoming commit message.");
+                                    break;
+                                }
+                                memcpy(commitMessages[num_responses].data_ptr, tempCommit->data, dataSize);
+
+                                num_responses++;
+                            } else {
+                                logMsg("Throwing away a non-commit message");
+                            }
+                        }
+
+                        if (num_responses < DHT_REPLICATION - 1){
+                            /* FIXME: What else needs to happen here? */
+                            logMsg("Worker did not receive enough commit messages.");
+                            break;
+                        }
+
+                        table_entry_t commitResult;
+                        rv = checkEntryConsensus(commitMessages, num_responses,&commitResult);
+                        if (rv == 0) {
+                            logMsg("Storing data...");
+                            context->localPut(commitResult.digest, commitResult.data_ptr, commitResult.data_size);
+                            success = true;
+                            for (i = 0; i < num_responses; i++) {free(commitMessages[i].data_ptr);}
+                        } else {
+                            perror("ERROR: Commit Consensus Failed! Aborting...");
+                            break;
+                        }
+                    }
+
+                } else {
+                    std::cout << "ERROR: Prepare Consensus Failed! Aborting..." << std::endl;
+                    free(pMsg);
+                    free(ppMsg);
+                    for (i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
+                    break;
+                }
+
+                std::cout << "Finished storing data." << std::endl;
+                free(pMsg);
+                free(ppMsg);
+                for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
+                break;
+
+                // Send reply to pre-prepare originating node
+                worker_put_rep_msg_t reply;
+                if(success){
+                    reply.result = true;
+                }
+                else{
+                    reply.result = false;
+                }
+                sendto(outSock, &reply, sizeof(reply), 0,
+                       (sockaddr*)&newJobMsg.reqAddr, newJobMsg.addrLen);
+            }
+
+
+            case MSG_TYPE_GET_DATA_FWD: {
+                logMsg("Handling get_fwd message");
+                if (bytesRead < sizeof(worker_get_fwd_msg_t)) {
+                    /* FIXME: Handle error condition */
+                    perror("Worker received mis-formed message.");
+                    break;
+                }
+
+                worker_get_fwd_msg_t *getMsg;
+                getMsg = static_cast<worker_get_fwd_msg_t*>(buf);
+                /* localGet returns pointer to data in hash table and its size */
+                int dataSize;
+                void *data;
+                context->localGet(getMsg->digest, &data, &dataSize);
+                /* FIXME: Need error checking after localGet */
+
+                size_t repSize = sizeof(worker_get_rep_msg_t) + dataSize;
+                if (repSize > bufSize){
+                    perror("Worker reply message size exceeds maximum buffer size.");
+                    free(data);
+                    break;
+                }
+                worker_get_rep_msg_t *repMsg;
+                repMsg = static_cast<worker_get_rep_msg_t*>(buf);
+
+                repMsg->msgType = MSG_TYPE_GET_DATA_REP;
+                memcpy(repMsg->data, data, dataSize);
+                free(data);
+
+                /* Send back reply */
+                bytesSent = sendto(outSock, buf, repSize, 0,
+                                  (sockaddr*)&newJobMsg.reqAddr, newJobMsg.addrLen);
+
+                free(repMsg);
+                break;
+            }
+
+            case MSG_TYPE_PUT_DATA_REQ: {
+                logMsg("Worker starting put request.");
+                if (bytesRead < sizeof(worker_put_req_msg_t)) {
+                    /* FIXME: Handle error condition */
+                    perror("Worker received mis-formed put request message.");
+                    break;
+                }
+
+                worker_put_req_msg_t *putMsg;
+                putMsg = static_cast<worker_put_req_msg_t*>(buf);
+
+                logMsg("Worker put request started.");
+
+                /* FIXME: Topic no longer used, but do need to find who to send to */
+                char targetTopic[MSG_TOPIC_SIZE];
+                char tempTopic[MSG_TOPIC_SIZE];
+                std::string tempAddr;
+                memcpy(targetTopic,context->myTopic,3);
+                targetTopic[3] = (char)((((int)putMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES)+context->myTopic[3]);
+                memcpy(tempTopic,targetTopic,4);
+
+                size_t ppSize = bytesRead + 3*MSG_TOPIC_SIZE;
+                size_t dataSize = bytesRead - sizeof(worker_put_req_msg_t);
+                worker_pre_prepare_t *prePrepareMsg = (worker_pre_prepare_t *) malloc(ppSize);
+                if (prePrepareMsg == nullptr){
+                    perror("Worker failed to allocate memory for sending pre-prepare messages.");
+                    break;
+                }
+                prePrepareMsg->msgType = MSG_TYPE_PRE_PREPARE;
+
+                int peerCnt = 0, targetIp;
+                std::string ipStr;
+                for (i = 0; i < DHT_REPLICATION; i++) {
+                    logMsg("Creating a pre-prepare message");
+                    targetIp = (int)targetTopic[3] + i;
+                    if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
+                    tempTopic[3] = (char)targetIp;
+
+                    /* Setup outAddr */
+                    ipStr = ipCharArrayToStr(tempTopic, IP_ADDR_SIZE);
+                    rv = inet_aton(ipStr.c_str(), &(outAddr[i].sin_addr));
+                    if (rv == 0){
+                        perror("inet_aton failed to convert IP string to address for pre-prepare message.");
+                        continue;
+                    }
+
+                    /* Fill peer data */
+                    for (int j = 0; j < DHT_REPLICATION; j++) {
+                        if (i == j) continue;
+                        targetIp = (int)targetTopic[3] + j;
+                        if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
+                        tempTopic[3] = (char)targetIp;
+                        memcpy(prePrepareMsg->peers[peerCnt],tempTopic,4);
+                        peerCnt++;
+                    }
+
+                    peerCnt = 0;
+                    prePrepareMsg->digest = putMsg->digest;
+                    mempcpy(prePrepareMsg->data, putMsg->data, dataSize);
+
+                    bytesSent = sendto(outSock, prePrepareMsg, ppSize, 0,
+                                       (sockaddr*) &(outAddr[i]), outAddrLen);
+                }
+                /* FIXME: Safe to free prePrepareMsg here? */
+
+                /* FIXME: Wait on reply and do something with it */
+                int numResponses = 0;
+                sockaddr_storage repAddr[DHT_REPLICATION];
+                socklen_t  repAddrLen[DHT_REPLICATION];
+                while(numResponses < DHT_REPLICATION){
+                    rv = poll(&managerSockPoll, 1, DEFAULT_TIMEOUT_MS);
+                    if (rv == 0){
+                        // Timeout occured
+                        /* TODO: Gracefully handle timeout */
+                        logMsg("Timeout occurred waiting for put reply messages");
+                        break;
+                    }
+                    if (rv < 0){
+                        perror("Worker encountered error while polling manager socket.");
+                        break;
+                    }
+
+                    if (managerSockPoll.revents & POLLIN){
+                        bytesRead = recv(managerSock, buf, bufSize, MSG_DONTWAIT);
+                        if (bytesRead < 0){
+                            if(errno == EAGAIN || errno == EWOULDBLOCK){
+                                /* No message ready */
+                                logMsg("Worker tried to read empty buffer on manager socket.");
+                                break;
+                            }
+                            else{
+                                perror("Worker encountered error receiving from manager socket.");
+                                break;
+                            }
+                        }
+                        else if (bytesRead < sizeof(worker_put_rep_msg_t)){
+                            perror("Worker received undersized message instead of put reply message.");
+                            break;
+                        }
+
+                        msg_header_t *tempHeader;
+                        tempHeader = static_cast<msg_header_t*>(buf);
+                        if (tempHeader->msgType == MSG_TYPE_PUT_DATA_REP) {
+                            /* FIXME: Gather responses */
+                            numResponses++;
+                        }
+                        else{
+                            logMsg("Throwing away a non-reply message");
+                        }
+                    }
+                }
+
+                /* TODO: Evaluate responses and send data back to client here */
+                /* FIXME: Can't talk to client using outSock */
+                worker_put_rep_msg_t putReply;
+                putReply.result = true;
+                bytesSent = sendto(outSock, &putReply, sizeof(putReply), 0,
+                                   (sockaddr*) &(newJobMsg.reqAddr), newJobMsg.addrLen);
+
+                /* Safe to free memory at this point */
+                free(prePrepareMsg);
+                sendDone = 0;
+                break;
+            }
+
+            /* FIXME: Shouldn't get message always be fixed size? */
+            case MSG_TYPE_GET_DATA_REQ: {
+                logMsg("Worker get request started.");
+
+                if (bytesRead < sizeof(worker_get_req_msg_t)) {
+                    /* FIXME: Handle error condition */
+                    perror("Worker received mis-formed get request message.");
+                    break;
+                }
+
+                worker_get_req_msg_t *getMsg;
+                getMsg = static_cast<worker_get_req_msg_t*>(buf);
+
+                char targetTopic[MSG_TOPIC_SIZE];
+                char tempTopic[MSG_TOPIC_SIZE];
+                memcpy(targetTopic,context->myTopic,3);
+                targetTopic[3] = (char)((((int)getMsg->digest.bytes[CryptoPP::SHA256::DIGESTSIZE-1])%NUM_NODES)+1);
+                memcpy(tempTopic,targetTopic,4);
+
+                size_t gfSize = sizeof(worker_get_fwd_msg_t);
+                worker_get_fwd_msg_t getFwdMsg;
+                getFwdMsg.msgType = MSG_TYPE_GET_DATA_FWD;
+                getFwdMsg.digest = getMsg->digest;
+
+
+                int targetIp;
+                std::string ipStr;
+                for (i = 0; i < DHT_REPLICATION; i++) {
+                    logMsg("Creating a get message.");
+
+                    targetIp = (int)targetTopic[3] + i;
+                    if (targetIp > NUM_NODES) {targetIp -= NUM_NODES;}
+                    tempTopic[3] = (char)targetIp;
+
+                    /* Setup outAddr */
+                    ipStr = ipCharArrayToStr(tempTopic, IP_ADDR_SIZE);
+                    rv = inet_aton(ipStr.c_str(), &(outAddr[i].sin_addr));
+                    if (rv == 0){
+                        perror("inet_aton failed to convert IP string to address for get fwd message.");
+                        continue;
+                    }
+
+                    bytesSent = sendto(outSock, &getFwdMsg, sizeof(getFwdMsg), 0,
+                                       (sockaddr*) (&outAddr[i]), outAddrLen);
+                }
+
+                /* FIXME: Wait on reply and do something with it */
+                int numResponses = 0;
+                sockaddr_storage repAddr[DHT_REPLICATION];
+                socklen_t  repAddrLen[DHT_REPLICATION];
+                while(numResponses < DHT_REPLICATION){
+                    rv = poll(&managerSockPoll, 1, DEFAULT_TIMEOUT_MS);
+                    if (rv == 0){
+                        // Timeout occured
+                        /* TODO: Gracefully handle timeout */
+                        logMsg("Timeout occurred waiting for put reply messages");
+                        break;
+                    }
+                    if (rv < 0){
+                        perror("Worker encountered error while polling manager socket.");
+                        break;
+                    }
+
+                    if (managerSockPoll.revents & POLLIN){
+                        bytesRead = recv(managerSock, buf, bufSize, MSG_DONTWAIT);
+                        if (bytesRead < 0){
+                            if(errno == EAGAIN || errno == EWOULDBLOCK){
+                                /* No message ready */
+                                logMsg("Worker tried to read empty buffer on manager socket.");
+                                break;
+                            }
+                            else{
+                                perror("Worker encountered error receiving from manager socket.");
+                                break;
+                            }
+                        }
+                        else if (bytesRead < sizeof(worker_get_rep_msg_t)){
+                            perror("Worker received undersized message instead of get reply message.");
+                            break;
+                        }
+
+                        msg_header_t *tempHeader;
+                        tempHeader = static_cast<msg_header_t*>(buf);
+                        if (tempHeader->msgType == MSG_TYPE_GET_DATA_REP) {
+                            /* FIXME: Gather responses */
+                            numResponses++;
+                        }
+                        else{
+                            logMsg("Throwing away a non-reply message");
+                        }
+                    }
+                }
+
+                /* TODO: Evaluate responses and send data back to client here */
+                /* FIXME: Can't talk to client using outSock */
+                worker_get_rep_msg_t getReply;
+                bytesSent = sendto(outSock, &getReply, sizeof(getReply), 0,
+                                   (sockaddr*) &(newJobMsg.reqAddr), newJobMsg.addrLen);
+                break;
+            }
+
+            default:
+                /* FIXME: Unrecognized message error */
+                break;
+        } /* End switch MSG_TYPE */
 
         /* FIXME: Is this totally useless now? *?
         /*if(sendDone) {
@@ -892,6 +1040,9 @@ void* Node::workerMain(void* arg)
         sendDone = 1;
          */
     }
+
+    /* TODO: Other cleanup */
+    free(buf);
 }
 
 int Node::put(std::string key_str, void* data_ptr, int data_bytes)
@@ -923,6 +1074,7 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     memcpy(putMsg->data, data_ptr, data_bytes);
 
     send(this->clientSock, putMsg, msgSize, 0);
+    free(putMsg);
 
     /* FIXME: Is this waiting for ACK or success/fail confirmation? */
     ssize_t bytesRead;
@@ -950,7 +1102,6 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     /* FIXME: Flush buffer if reply message larger than expected? */
 
     /* TODO: Confirm result matches request? */
-    free(putMsg);
 
     return 0;
 }
@@ -1060,6 +1211,7 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
 //    }
 
     /* Receive response */
+    /* FIXME: Mem leak occurs if this function does not return successfully. */
     worker_get_rep_msg_t *getRep;
     getRep = static_cast<worker_get_rep_msg_t*>(malloc(MAX_MSG_SIZE));
     if (getRep == nullptr){
@@ -1124,7 +1276,9 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     }
     memcpy(*(data_ptr), response.value_ptr, response.value_size);
     *(data_bytes) = response.value_size;
+
     free(response.value_ptr);
+    free(getRep);
 
     return 0;
 }
@@ -1209,7 +1363,8 @@ int Node::computeDigest(std::string key_str, digest_t* digest)
     if (key_size > MAX_KEY_LEN){
         return -1;
     }
-    auto *key = new char[key_size];
+    /* FIXME: Is there a reason I do this instead of passing .c_str() directly to hasher? */
+    char key[key_size];
     std::strcpy(key, key_str.c_str());
 
     /* Use hashing function on value to calculate digest */
@@ -1395,13 +1550,13 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
 int logMsg(std::string msg)
 {
 #ifdef NODE_DEBUG
-    std::cout << msg<< std::endl;
+    std::cout << msg << std::endl;
 #endif
 
     return 0;
 }
 
-std::string peerArrayToIP(char *ip, size_t ip_len)
+std::string ipCharArrayToStr(char *ip, size_t ip_len)
 {
     uint8_t temp, i;
     std::string retStr;

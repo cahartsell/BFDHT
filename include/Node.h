@@ -29,7 +29,8 @@
 /* Hardcoded multicast IP Address */
 #define MULTICAST_IP "239.192.1.1"
 #define NETWORK_PROTOCOL "tcp://"
-#define PORT "8476"
+#define PORT_STR "8476"
+#define PORT 8476
 #define DEFAULT_TIMEOUT_MS 2000
 
 /* Path for IPC communication.
