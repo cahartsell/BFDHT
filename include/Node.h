@@ -67,6 +67,7 @@ typedef struct value_t{
 } value_t;
 
 typedef struct table_entry_t {
+    table_entry_t() : data_ptr(nullptr), data_size(0) {}
     void* data_ptr;
     size_t data_size;
     digest_t digest;

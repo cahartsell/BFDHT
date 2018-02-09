@@ -81,7 +81,8 @@ int Node::startup() {
 
     /* Setup worker sockets */
     for(i = 0; i < INIT_WORKER_THREAD_CNT; i++) {
-        rv = socketpair(AF_UNIX, SOCK_STREAM, 0, tempPair);
+        /* Note: SOCK_DGRAM preserves message boundaries. SOCK_STREAM does not */
+        rv = socketpair(AF_UNIX, SOCK_DGRAM, 0, tempPair);
         if (rv < 0){
             perror("Failed to create worker socket pair.");
         }
@@ -91,7 +92,8 @@ int Node::startup() {
     }
 
     /* Setup client cmd socket */
-    rv = socketpair(AF_UNIX, SOCK_STREAM, 0, tempPair);
+    /* Note: SOCK_DGRAM preserves message boundaries. SOCK_STREAM does not */
+    rv = socketpair(AF_UNIX, SOCK_DGRAM, 0, tempPair);
     if (rv < 0){
         perror("Failed to create CMD socket pair.");
     }
@@ -371,12 +373,6 @@ void* Node::main(void* arg)
                     /* Configure tempWorker */
                     worker_t tempWorker;
                     tempWorker.sock = availableWorkers.back();
-                    if (msgHeader->msgType == MSG_TYPE_PRE_PREPARE) {
-                        /* Start of PBFT exchange. Store digest (key) */
-                        worker_pre_prepare_t *clientMsg;
-                        clientMsg = static_cast<worker_pre_prepare_t *>(buf);
-                        tempWorker.currentKey = clientMsg->digest;
-                    }
 
                     /* Send start of new job message to appropriate worker */
                     /* FIXME: How to tell worker to respond to client instead of network? */
@@ -401,7 +397,6 @@ void* Node::main(void* arg)
                     /* Unrecognized msg type */
                     break;
             }
-            /* TODO: Write this */
         }
     }
 
@@ -520,6 +515,7 @@ void* Node::workerMain(void* arg)
                 size_t dataSize = bytesRead - sizeof(worker_pre_prepare_t);
                 worker_pre_prepare_t *ppMsg = (worker_pre_prepare_t *) malloc((size_t) bytesRead);
                 if (ppMsg == nullptr) {
+                    perror("Worker failed to allocate memory for pre-prepare message.");
                     /* FIXME: Handle error condition */
                     break;
                 }
@@ -542,11 +538,13 @@ void* Node::workerMain(void* arg)
                 pMsg = (worker_prepare_t *) malloc(prepareSize);
                 if (pMsg == nullptr){
                     perror("Worker failed to allocate memory for prepare message.");
+                    free(ppMsg);
                     break;
                 }
                 memcpy(pMsg->data, ppMsg->data, dataSize);
                 pMsg->digest = ppMsg->digest;
                 pMsg->msgType = MSG_TYPE_PREPARE;
+                free(ppMsg);
 
                 /* Send prepare messages */
                 for (i = 0; i < DHT_REPLICATION - 1; i++){
@@ -563,7 +561,13 @@ void* Node::workerMain(void* arg)
                 table_entry_t prepMessages[DHT_REPLICATION];
                 prepMessages[0].digest = pMsg->digest;
                 prepMessages[0].data_size = dataSize;
-                prepMessages[0].data_ptr = pMsg->data;
+                prepMessages[0].data_ptr = malloc(dataSize);
+                if (prepMessages[0].data_ptr == nullptr){
+                    perror("Worker failed to allocate memory for incoming prepare message.");
+                    break;
+                }
+                memcpy(prepMessages[0].data_ptr, pMsg->data, dataSize);
+                free(pMsg);
 
                 int num_responses = 1;
                 sockaddr_storage repAddr[DHT_REPLICATION - 1];
@@ -646,9 +650,6 @@ void* Node::workerMain(void* arg)
 
                     for (i = 0; i < DHT_REPLICATION - 1; i++){
                         logMsg("Sending commit message");
-                        /* FIXME: Topic no longer needed */
-                        memcpy(cMsg->msgTopic,ppMsg->peers[i],MSG_TOPIC_SIZE);
-
                         bytesSent = sendto(outSock, cMsg, commitSize, 0,
                                            (sockaddr*) &(outAddr[i]), outAddrLen);
                     }
@@ -736,15 +737,12 @@ void* Node::workerMain(void* arg)
 
                 } else {
                     std::cout << "ERROR: Prepare Consensus Failed! Aborting..." << std::endl;
-                    free(pMsg);
-                    free(ppMsg);
                     for (i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
                     break;
                 }
 
                 std::cout << "Finished storing data." << std::endl;
-                free(pMsg);
-                free(ppMsg);
+                /* FIXME: Can we get rid of this free somehow? */
                 for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
                 break;
 
