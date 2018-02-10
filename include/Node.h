@@ -26,9 +26,6 @@
 #define DHT_REPLICATION 4
 #define NUM_NODES 4
 
-/* Hardcoded multicast IP Address */
-#define MULTICAST_IP "239.192.1.1"
-#define NETWORK_PROTOCOL "tcp://"
 #define PORT_STR "8476"
 #define PORT 8476
 #define DEFAULT_TIMEOUT_MS 2000
@@ -39,9 +36,7 @@
 #define IPC_BASE_PATH "@/tmp/BFDHT/"
 #define MAX_PATH_LEN 104
 
-/* Hardcoded message topic until more appropriate topics available */
-#define DEFAULT_TOPIC "ABCD"
-
+/* FIXME: I don't particularly like this */
 enum pollIds{
     WORKER_0 = 0,
     WORKER_1 = 1,
@@ -96,12 +91,6 @@ typedef struct worker_t{
     int sock;
     digest_t currentKey;
 } worker_t;
-
-/* Worker request socket type */
-typedef struct worker_req_sock_t{
-    zmq::socket_t *sock;
-    std::string curEndpoint;
-} worker_req_sock_t;
 
 typedef struct worker_new_job_msg_t{
     sockaddr_storage reqAddr;

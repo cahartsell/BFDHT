@@ -1085,7 +1085,6 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     /* FIXME: Topic no longer used */
     putMsg->msgType = MSG_TYPE_PUT_DATA_REQ;
     putMsg->digest = digest;
-    memcpy(putMsg->msgTopic, DEFAULT_TOPIC, sizeof(putMsg->msgTopic));
     memcpy(putMsg->sender, myTopic, sizeof(putMsg->sender)); //FIXME: MY IP
     memcpy(putMsg->data, data_ptr, data_bytes);
 
@@ -1142,7 +1141,6 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     worker_get_req_msg_t getMsg;
     getMsg.msgType = MSG_TYPE_GET_DATA_REQ;
     getMsg.digest = digest;
-    memcpy(getMsg.msgTopic, DEFAULT_TOPIC, MSG_TOPIC_SIZE);
     memcpy(getMsg.sender, myTopic, MSG_TOPIC_SIZE);
 
     /* FIXME: Do we need to wait and compare results here, or has that been done already? */
