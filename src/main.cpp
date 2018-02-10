@@ -57,7 +57,12 @@ int main() {
             }
         }
         else if(userIn.compare("shutdown") == 0) {
-            node->shutdown();
+            rv = node->shutdown();
+            if (rv == 0){
+                std::cout << "Node shutdown successful." << std::endl;
+            } else{
+                std::cout << "Node did not shutdown cleanly." << std::endl;
+            }
             break;
         }
     }

@@ -74,17 +74,17 @@ typedef struct table_entry_t {
 } table_entry_t;
 
 /* Data type passed to main thread */
-typedef struct main_thread_data_t {
-    void *node;
+typedef struct manager_thread_data_t {
     pthread_barrier_t* barrier;
     int workerSock[INIT_WORKER_THREAD_CNT];
+    pthread_t workerThreads[INIT_WORKER_THREAD_CNT];
     int clientSock;
-} main_thread_data_t;
+} manager_thread_data_t;
 
 /* Data type passed to worker thread */
 typedef struct worker_arg_t{
     worker_arg_t() : node(nullptr), id(0) {}
-    void *node;
+    void* node;
     int id;
     int managerSock;
     pthread_barrier_t* barrier;
@@ -124,7 +124,7 @@ public:
 
 private:
     /* Private Functions */
-    static void* main(void* arg);
+    static void* manager(void *arg);
     static void* workerMain(void* arg);
     int computeDigest(std::string key_str, digest_t* digest);
     void freeTableMem();
@@ -138,7 +138,7 @@ private:
     std::map<digest_t, value_t> table;
     std::mutex tableMutex;
     Chord* chord;
-    pthread_t mainThread, workerThreads[INIT_WORKER_THREAD_CNT];
+    pthread_t managerThread;
     char myTopic[MSG_TOPIC_SIZE];
     int clientSock;
 };

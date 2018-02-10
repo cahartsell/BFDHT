@@ -21,6 +21,9 @@ int logMsg(std::string msg);
 int checkConsensus(value_t* responses, int responseCnt, value_t* answer);
 int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t* answer);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
+int findWorkerWithSock(std::vector<worker_t>::iterator* in_worker, std::vector<worker_t> &workers, int sock);
+int sendShutdown(int sock, pthread_t thread, int timeout_ms);
+
 
 Node::Node()
 {
@@ -60,11 +63,6 @@ Node::~Node()
 {
     delete chord;
 
-//    std::vector<worker_t>::iterator it;
-//    for (it = workers.begin(); it != workers.end(); it++){
-//        delete it->sock;
-//    }
-
     freeTableMem();
     /* TODO: Cleanup worker threads here */
 }
@@ -76,7 +74,7 @@ int Node::startup() {
     /* Socket init sections based heavily off Beej's Networking and UNIX IPC Guides */
     /* Available at www.beej.us */
     int tempPair[2], rv, i;
-    main_thread_data_t mainArg;
+    manager_thread_data_t managerArg;
     worker_arg_t workerArg[INIT_WORKER_THREAD_CNT];
 
     /* Setup worker sockets */
@@ -87,7 +85,7 @@ int Node::startup() {
             perror("Failed to create worker socket pair.");
         }
 
-        mainArg.workerSock[i] = tempPair[0];
+        managerArg.workerSock[i] = tempPair[0];
         workerArg[i].managerSock = tempPair[1];
     }
 
@@ -98,7 +96,7 @@ int Node::startup() {
         perror("Failed to create CMD socket pair.");
     }
 
-    mainArg.clientSock = tempPair[0];
+    managerArg.clientSock = tempPair[0];
     this->clientSock = tempPair[1];
 
     /* Configure timeout on clientSock */
@@ -111,15 +109,14 @@ int Node::startup() {
         perror("Failed to set timeout on client sock.");
     }
 
-    /* Spawn thread for Node::main() */
+    /* Spawn thread for Node::manager() */
     /* NOTE: This is done last to ensure all worker sockets have been created */
     /* FIXME: Make this (and everything else) thread safe. */
-    pthread_barrier_t mainBarrier;
-    rv = pthread_barrier_init(&mainBarrier, nullptr, 2);
-    mainArg.node = (void*) this;
-    mainArg.barrier = &mainBarrier;
-    pthread_create(&mainThread, nullptr, main, (void*) &mainArg);
-    pthread_barrier_wait(&mainBarrier);
+    pthread_barrier_t managerBarrier;
+    rv = pthread_barrier_init(&managerBarrier, nullptr, 2);
+    managerArg.barrier = &managerBarrier;
+    pthread_create(&managerThread, nullptr, manager, (void *) &managerArg);
+    pthread_barrier_wait(&managerBarrier);
 
     /* Spawn worker thread pool */
     pthread_barrier_t workerBarrier;
@@ -130,12 +127,12 @@ int Node::startup() {
         workerArg[i].node = this;
         workerArg[i].barrier = &workerBarrier;
         /* FIXME: Need to confirm pthread_create success */
-        pthread_create(&(workerThreads[i]), nullptr, workerMain, (void*) &(workerArg[i]));
+        pthread_create(&(managerArg.workerThreads[i]), nullptr, workerMain, (void*) &(workerArg[i]));
     }
     pthread_barrier_wait(&workerBarrier);
 
     pthread_barrier_destroy(&workerBarrier);
-    pthread_barrier_destroy(&mainBarrier);
+    pthread_barrier_destroy(&managerBarrier);
     logMsg("Node startup complete.");
     return 0;
 }
@@ -144,36 +141,37 @@ int Node::shutdown()
 {
     /* TODO: Perform other cleanup? */
     /* FIXME: Change this to use proxyControlSock */
-    worker_msg_header_t msgHeader;
-    zmq::message_t msg(sizeof(msgHeader));
-    msgHeader.msgType = MSG_TYPE_THREAD_SHUTDOWN;
-    memcpy(msg.data(), &msgHeader, msg.size());
-    /* FIXME: Send shutdown message */
 
-    /* FIXME: Wait for shutdown complete message here */
-    //zmq::message_t recvMsg;
-    //clientSockClient->recv(recvMsg);
+    /* FIXME: Manager may need longer timeout to shutdown all workers */
+    int rv;
+    rv = sendShutdown(this->clientSock, managerThread, DEFAULT_TIMEOUT_MS);
+
+    if (rv != 0){
+        perror("Node failed to shutdown cleanly");
+        return -1;
+    }
+
     return 0;
 }
 
-void* Node::main(void* arg)
+void* Node::manager(void *arg)
 {
-    auto *mainData = static_cast<main_thread_data_t*>(arg);
-
-    Node *context = static_cast<Node*>(mainData->node);
+    auto *managerData = static_cast<manager_thread_data_t*>(arg);
 
     pollfd pollItems[POLL_IDS_SIZE];
     int workerSock[INIT_WORKER_THREAD_CNT], i;
+    pthread_t workerThread[INIT_WORKER_THREAD_CNT];
 
     /* Setup worker sockets */
     for(i = 0; i < INIT_WORKER_THREAD_CNT; i++) {
-        workerSock[i] = mainData->workerSock[i];
+        workerSock[i] = managerData->workerSock[i];
+        workerThread[i] = managerData->workerThreads[i];
         pollItems[i].fd = workerSock[i];
         pollItems[i].events = POLLIN;
     }
 
     /* Setup poll for client CMD sock */
-    int clientSock = mainData->clientSock;
+    int clientSock = managerData->clientSock;
     pollItems[CLIENT_CMD].fd = clientSock;
     pollItems[CLIENT_CMD].events = POLLIN;
 
@@ -235,7 +233,7 @@ void* Node::main(void* arg)
     }
 
     /* Signal init complete */
-    pthread_barrier_wait(mainData->barrier);
+    pthread_barrier_wait(managerData->barrier);
 
     /* Main proxy loop */
     while(running){
@@ -336,10 +334,18 @@ void* Node::main(void* arg)
                     continue;
                 }
 
-                /* If this is a "READY" message, we are done. Otherwise reply to client */
+                /* If this is a "READY" message, add worker to available workers.
+                 * Also remove from busy workers, if it is present */
                 if (strncmp(static_cast<char *>(buf), "READY", 5) == 0) {
                     assert(availableWorkers.size() < INIT_WORKER_THREAD_CNT);
                     availableWorkers.push_back(pollItems[i].fd);
+
+                    /* FIXME: This could be done more efficiently with something other than a vector (map maybe) */
+                    std::vector<worker_t>::iterator tempWorker;
+                    rv = findWorkerWithSock(&tempWorker, busyWorkers, pollItems[i].fd);
+                    if (rv == 0) {
+                        busyWorkers.erase(tempWorker);
+                    }
                 }
             }
         }
@@ -358,7 +364,15 @@ void* Node::main(void* arg)
             msg_header_t* msgHeader = static_cast<msg_header_t*>(buf);
             switch (msgHeader->msgType){
                 case MSG_TYPE_THREAD_SHUTDOWN:
-                    /* TODO: Write this */
+                    /* TODO: More cleanup? */
+                    running = false;
+
+                    /* Distribute shutdown message to workers */
+                    for(i = WORKER_0; i < INIT_WORKER_THREAD_CNT + WORKER_0; i++) {
+                        /* FIXME: If worker is in the middle of a PBFT exchange,
+                         * it likely won't process shutdown message before timeout occurs */
+                        sendShutdown(pollItems[i].fd, workerThread[i], DEFAULT_TIMEOUT_MS);
+                    }
                     break;
 
                 case MSG_TYPE_PUT_DATA_REQ:
@@ -405,6 +419,8 @@ void* Node::main(void* arg)
         close(pollItems[i].fd);
     }
     free(buf);
+
+    pthread_exit(0);
 }
 
 void* Node::workerMain(void* arg)
@@ -451,13 +467,6 @@ void* Node::workerMain(void* arg)
     }
     outAddrLen = sizeof(sockaddr_in);
 
-    /* Notify manager we are ready */
-    std::string tempStr;
-    tempStr = "READY";
-    bytesRead = (tempStr.length() < bufSize)? tempStr.length() : bufSize;
-    strncpy((char*)buf, tempStr.c_str(), (size_t) bytesRead);
-    send(managerSock, buf, (size_t) bytesRead, 0);
-
     std::string logstr = "Worker started with id ";
     logstr.append(std::to_string(id));
     logMsg(logstr);
@@ -468,7 +477,13 @@ void* Node::workerMain(void* arg)
     int running = true, sendDone = true, success;
     worker_new_job_msg_t newJobMsg;
     msg_header_t *msgHeader;
+    std::string readyStr = "READY";
     while(running) {
+        /* Notify manager we are ready */
+        bytesSent = (readyStr.length() < bufSize)? readyStr.length() : bufSize;
+        strncpy((char*)buf, readyStr.c_str(), (size_t) bytesSent);
+        bytesSent = send(managerSock, buf, (size_t) bytesSent, 0);
+
         logMsg("Worker listening for message");
 
         /* Recv and store new job msg */
@@ -631,12 +646,15 @@ void* Node::workerMain(void* arg)
                 if (num_responses < DHT_REPLICATION - 1){
                     /* FIXME: What else needs to happen here? */
                     logMsg("Worker did not receive enough prepare messages.");
+                    for (i = 0; i < num_responses; i++) {free(prepMessages[i].data_ptr);}
                     break;
                 }
 
+                /* Check if received prepare messages agree and free memory */
                 table_entry_t prepareResult;
-                /*Consensus happens here, produces a message to commit*/
                 rv = checkEntryConsensus(prepMessages, num_responses, &prepareResult);
+                for (i = 0; i < num_responses; i++) {free(prepMessages[i].data_ptr);}
+
                 if (rv == 0){
                     size_t commitSize = sizeof(worker_commit_t) + prepareResult.data_size;
                     if (commitSize > bufSize){
@@ -717,18 +735,23 @@ void* Node::workerMain(void* arg)
                         }
 
                         if (num_responses < DHT_REPLICATION - 1){
-                            /* FIXME: What else needs to happen here? */
+                            /* FIXME: What else needs to happen here? Send some reply? */
+                            /* Free commit messages */
+                            for (i = 0; i < num_responses; i++) {free(commitMessages[i].data_ptr);}
                             logMsg("Worker did not receive enough commit messages.");
                             break;
                         }
 
+                        /* Check if received commit messages agree */
                         table_entry_t commitResult;
                         rv = checkEntryConsensus(commitMessages, num_responses,&commitResult);
+                        /* Free commit messages */
+                        for (i = 0; i < num_responses; i++) {free(commitMessages[i].data_ptr);}
+
                         if (rv == 0) {
                             logMsg("Storing data...");
                             context->localPut(commitResult.digest, commitResult.data_ptr, commitResult.data_size);
                             success = true;
-                            for (i = 0; i < num_responses; i++) {free(commitMessages[i].data_ptr);}
                         } else {
                             perror("ERROR: Commit Consensus Failed! Aborting...");
                             break;
@@ -737,13 +760,10 @@ void* Node::workerMain(void* arg)
 
                 } else {
                     std::cout << "ERROR: Prepare Consensus Failed! Aborting..." << std::endl;
-                    for (i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
                     break;
                 }
 
                 std::cout << "Finished storing data." << std::endl;
-                /* FIXME: Can we get rid of this free somehow? */
-                for (int i = 0; i < DHT_REPLICATION; i++) {free(prepMessages[i].data_ptr);}
                 break;
 
                 // Send reply to pre-prepare originating node
@@ -819,7 +839,8 @@ void* Node::workerMain(void* arg)
 
                 size_t ppSize = bytesRead + 3*MSG_TOPIC_SIZE;
                 size_t dataSize = bytesRead - sizeof(worker_put_req_msg_t);
-                worker_pre_prepare_t *prePrepareMsg = (worker_pre_prepare_t *) malloc(ppSize);
+                worker_pre_prepare_t *prePrepareMsg;
+                prePrepareMsg = (worker_pre_prepare_t*) malloc(ppSize);
                 if (prePrepareMsg == nullptr){
                     perror("Worker failed to allocate memory for sending pre-prepare messages.");
                     break;
@@ -1023,24 +1044,14 @@ void* Node::workerMain(void* arg)
             }
 
             default:
-                /* FIXME: Unrecognized message error */
+                /* FIXME: Handle Unrecognized message error */
                 break;
         } /* End switch MSG_TYPE */
-
-        /* FIXME: Is this totally useless now? *?
-        /*if(sendDone) {
-            worker_msg_header_t finishedMsg;
-            zmq::message_t fMsg(sizeof(finishedMsg));
-            finishedMsg.msgType = MSG_TYPE_WORKER_FINISHED;
-            memcpy(fMsg.data(), &finishedMsg, sizeof(finishedMsg));
-            sock->send(fMsg);
-        }
-        sendDone = 1;
-         */
     }
 
     /* TODO: Other cleanup */
     free(buf);
+    pthread_exit(0);
 }
 
 int Node::put(std::string key_str, void* data_ptr, int data_bytes)
@@ -1128,11 +1139,11 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     memcpy(getMsg.sender, myTopic, MSG_TOPIC_SIZE);
 
     /* FIXME: Do we need to wait and compare results here, or has that been done already? */
-    /* Send GET_REQ message to node main thread */
+    /* Send GET_REQ message to node manager thread */
     send(this->clientSock, &getMsg, sizeof(getMsg), 0);
 
     /* FIXME: Worker thread now collects responses. Don't need this */
-    /* Wait for responses from node main thread */
+    /* Wait for responses from node manager thread */
 //    worker_get_rep_msg_t *getRep;
 //    value_t responses[DHT_REPLICATION];
 //    int num_responses = 0;
@@ -1534,7 +1545,6 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
     worker_t* tempWorker;
     for(it = workers.begin(); it != workers.end(); it++){
         tempWorker = it.base();
-        std::cout << "TempWorker: " << (tempWorker->currentKey == key) << std::endl;
         if (tempWorker->currentKey == key){
             *in_worker = tempWorker;
             return 0;
@@ -1543,6 +1553,65 @@ int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, dige
 
     /* No worker currently using specified key */
     return -1;
+}
+
+/* Similar to findWorkerWithKey, but searches based on socket and sets iterator */
+int findWorkerWithSock(std::vector<worker_t>::iterator* in_worker, std::vector<worker_t> &workers, int sock)
+{
+    /* Input check */
+    if (in_worker == nullptr){
+        return -1;
+    }
+
+    std::vector<worker_t>::iterator it;
+    worker_t* tempWorker;
+    for(it = workers.begin(); it != workers.end(); it++){
+        tempWorker = it.base();
+        if (tempWorker->sock == sock){
+            *in_worker = it;
+            return 0;
+        }
+    }
+
+    /* No worker currently using specified key */
+    return -1;
+}
+
+int sendShutdown(int sock, pthread_t thread, int timeout_ms)
+{
+
+    /* Distribute shutdown message to workers */
+    msg_header_t tempHeader;
+    tempHeader.msgType = MSG_TYPE_THREAD_SHUTDOWN;
+    ssize_t bytesSent;
+    void *retVal;
+    int rv;
+
+    timespec timeout;
+    timeout.tv_sec = (timeout_ms / 1000);
+    timeout.tv_nsec = (timeout_ms % 1000) * 1000;
+
+    bytesSent = send(sock, &tempHeader, sizeof(tempHeader), 0);
+
+    if (bytesSent != sizeof(tempHeader)) {
+        /* Message send failed. Send cancel request. */
+        perror("Failed sending shutdown message to thread. Sending cancel");
+        pthread_cancel(thread);
+    }
+
+    rv = pthread_timedjoin_np(thread, &retVal, &timeout);
+    if (rv != 0) {
+        if (errno == ETIMEDOUT){
+            perror("Thread did not shutdown in time. Sending cancel");
+            pthread_cancel(thread);
+            return -1;
+        } else {
+            perror("Thread did not shutdown properly.");
+            return -1;
+        }
+    }
+
+    return 0;
 }
 
 int logMsg(std::string msg)
