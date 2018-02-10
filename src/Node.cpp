@@ -672,10 +672,17 @@ void* Node::workerMain(void* arg)
                                            (sockaddr*) &(outAddr[i]), outAddrLen);
                     }
 
+                    /* FIXME: Don't like allocing this memory so often.
+                     * Switch to fixed memory buffers for these messages */
                     table_entry_t commitMessages[DHT_REPLICATION];
                     commitMessages[0].digest = cMsg->digest;
                     commitMessages[0].data_size = dataSize;
-                    commitMessages[0].data_ptr = cMsg->data;
+                    commitMessages[0].data_ptr = malloc(dataSize);
+                    if (commitMessages[0].data_ptr == nullptr){
+                        perror("Worker failed to allocate memory for incoming commit message.");
+                        break;
+                    }
+                    memcpy(commitMessages[0].data_ptr, cMsg->data, dataSize);
 
                     /* Wait for incoming commit messages */
                     int num_responses = 1;
@@ -763,16 +770,16 @@ void* Node::workerMain(void* arg)
                     break;
                 }
 
-                std::cout << "Finished storing data." << std::endl;
-                break;
-
                 // Send reply to pre-prepare originating node
                 worker_put_rep_msg_t reply;
+                reply.msgType = MSG_TYPE_PUT_DATA_REP;
                 if(success){
                     reply.result = true;
+                    logMsg("Finished storing data.");
                 }
                 else{
                     reply.result = false;
+                    logMsg("Failed storing data.");
                 }
                 sendto(outSock, &reply, sizeof(reply), 0,
                        (sockaddr*)&newJobMsg.reqAddr, newJobMsg.addrLen);
