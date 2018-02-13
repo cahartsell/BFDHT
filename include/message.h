@@ -54,6 +54,7 @@ typedef struct worker_put_rep_msg_t {
     char msgTopic[MSG_TOPIC_SIZE];
     char sender[IP_ADDR_SIZE];
     uint16_t msgType;
+    digest_t digest;
     char result;
 } worker_put_rep_msg_t;
 
@@ -109,23 +110,5 @@ typedef struct worker_commit_t {
     digest_t digest;
     char data[];
 } worker_commit_t;
-
-//namespace bfdht
-//{
-//    template<typename msgStruct>
-//    class message
-//    {
-//    public:
-//        /* Public Functions */
-//        message();
-//        message(zmq::message_t);
-//        ~message();
-//
-//        /* Public Variables */
-//        msgStruct data;
-//
-//    private:
-//    };
-//}
 
 #endif //BFDHT_MESSAGES_H

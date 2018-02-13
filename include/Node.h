@@ -29,6 +29,7 @@
 #define PORT_STR "8476"
 #define PORT 8476
 #define DEFAULT_TIMEOUT_MS 2000
+#define DEFAULT_WORKER_TIMEOUT_MS 500
 
 /* Path for IPC communication.
  * '@' symbol makes this an unnamed socket path (doesn't exist on disk)
