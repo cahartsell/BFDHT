@@ -56,6 +56,17 @@ typedef struct worker_put_rep_msg_t {
     uint16_t msgType;
     digest_t digest;
     char result;
+
+    /* Define comparison operator for worker_put_rep_msg_t */
+    bool operator== (const worker_put_rep_msg_t& other) const {
+        if (this->result != other.result) {
+            return false; /* Results don't match */
+        }
+        if (!(this->digest == other.digest)){
+            return false; /* Digests are different */
+        }
+        return true; /* Structs match */
+    }
 } worker_put_rep_msg_t;
 
 typedef struct worker_pre_prepare_t {

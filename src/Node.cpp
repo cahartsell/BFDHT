@@ -18,11 +18,12 @@
 void print_digest(digest_t digest);
 std::string ipCharArrayToStr(char *ip, size_t ip_len);
 int logMsg(std::string msg);
-int checkConsensus(value_t* responses, int responseCnt, value_t* answer);
-int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t* answer);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
 int findWorkerWithSock(std::vector<worker_t>::iterator* in_worker, std::vector<worker_t> &workers, int sock);
 int sendShutdown(int sock, pthread_t thread, int timeout_ms);
+
+template<typename TYPE>
+int checkConsensus(TYPE *entries, int entryCnt, TYPE **answer);
 
 
 Node::Node()
@@ -694,21 +695,21 @@ void* Node::workerMain(void* arg)
                 }
 
                 /* Check if received prepare messages agree and free memory */
-                table_entry_t prepareResult;
-                rv = checkEntryConsensus(peerValues, num_responses, &prepareResult);
+                table_entry_t *prepareResult;
+                rv = checkConsensus(peerValues, num_responses, &prepareResult);
                 if (rv != 0) {
                     perror("Prepare Consensus Failed! Aborting...");
                     break;
                 }
 
-                size_t commitSize = sizeof(worker_commit_t) + prepareResult.data_size;
+                size_t commitSize = sizeof(worker_commit_t) + prepareResult->data_size;
                 if (commitSize > bufSize){
                     perror("Worker commit message size exceeds maximum buffer size.");
                     break;
                 }
                 worker_commit_t *cMsg = static_cast<worker_commit_t*>(buf);
-                memcpy(cMsg->data, prepareResult.data_ptr, prepareResult.data_size);
-                cMsg->digest = prepareResult.digest;
+                memcpy(cMsg->data, prepareResult->data_ptr, prepareResult->data_size);
+                cMsg->digest = prepareResult->digest;
                 cMsg->msgType = MSG_TYPE_COMMIT;
 
                 for (i = 0; i < DHT_REPLICATION - 1; i++){
@@ -779,12 +780,12 @@ void* Node::workerMain(void* arg)
                 }
 
                 /* Check if received commit messages agree */
-                table_entry_t commitResult;
-                rv = checkEntryConsensus(peerValues, num_responses,&commitResult);
+                table_entry_t *commitResult;
+                rv = checkConsensus(peerValues, num_responses, &commitResult);
 
                 if (rv == 0) {
                     logMsg("Storing data...");
-                    context->localPut(commitResult.digest, commitResult.data_ptr, commitResult.data_size);
+                    context->localPut(commitResult->digest, commitResult->data_ptr, commitResult->data_size);
                     success = true;
                 } else {
                     perror("ERROR: Commit Consensus Failed! Aborting...");
@@ -794,7 +795,7 @@ void* Node::workerMain(void* arg)
                 // Send reply to pre-prepare originating node
                 worker_put_rep_msg_t reply;
                 reply.msgType = MSG_TYPE_PUT_DATA_REP;
-                reply.digest = commitResult.digest;
+                reply.digest = commitResult->digest;
                 if(success){
                     reply.result = true;
                     logMsg("Finished storing data.");
@@ -804,6 +805,7 @@ void* Node::workerMain(void* arg)
                     logMsg("Failed storing data.");
                 }
 
+                /********** DEBUGGING PRINT STATEMENTS ***************/
                 sockaddr_in *temp = (sockaddr_in*)(&newJobMsg.reqAddr);
                 char* ip = inet_ntoa(temp->sin_addr);
                 std::cout << "IP: " <<  ip << ":" << temp->sin_port << " " << temp->sin_family << std::endl;
@@ -973,29 +975,16 @@ void* Node::workerMain(void* arg)
                     }
                 }
 
-                /* TODO: Evaluate responses and send data back to client here */
-                /* FIXME: Need to use consensus here */
-                worker_put_rep_msg_t putReply;
-                putReply.msgType = MSG_TYPE_PUT_DATA_REP;
-                if (numResponses >= DHT_REPLICATION - 1){
-                    int successCnt = 0;
-                    for (i = 0; i < numResponses; i++){
-                        if (peerReplies[i].result != 0) successCnt++;
+                worker_put_rep_msg_t *putReply;
+                if (numResponses >= CONSENSUS_THRESHOLD){
+                    rv = checkConsensus(peerReplies, numResponses, &putReply);
+                    if (rv != 0){
+                        logMsg("Put replies did not agree.");
+                        putReply->result = false;
                     }
-
-                    if (successCnt >= DHT_REPLICATION - 1){
-                        putReply.result = true;
-                        putReply.digest = peerReplies[0].digest;
-                    } else {
-                        putReply.result = false;
-                    }
-                }
-                else{
-                    putReply.result = false;
+                    putReply->msgType = MSG_TYPE_PUT_DATA_REP;
                 }
                 bytesSent = send(managerSock, &putReply, sizeof(putReply), 0);
-
-                sendDone = 0;
                 break;
             }
 
@@ -1106,19 +1095,25 @@ void* Node::workerMain(void* arg)
 
                 /* Check for consensus */
                 worker_get_rep_msg_t *getReply;
-                table_entry_t getResult;
+                table_entry_t *getResult;
                 getReply = static_cast<worker_get_rep_msg_t*>(buf);
                 getReply->msgType = MSG_TYPE_GET_DATA_REP;
                 if (numResponses >= DHT_REPLICATION - 1) {
-                    rv = checkEntryConsensus(peerValues, numResponses, &getResult);
-                    /* FIXME : Check rv */
-                    getReply->digest = getResult.digest;
-                    memcpy(getReply->data, getResult.data_ptr, getResult.data_size);
+                    rv = checkConsensus(peerValues, numResponses, &getResult);
+                    if (rv == 0) {
+                        getReply->digest = getResult->digest;
+                        memcpy(getReply->data, getResult->data_ptr, getResult->data_size);
+                    }
+                    else {
+                        /* FIXME: Return get failed? */
+                        perror("Get replies failed consensus check");
+                        break;
+                    }
                 }
 
                 /* TODO: Evaluate responses and send data back to client here */
 
-                bytesSent = send(managerSock, getReply, sizeof(worker_get_rep_msg_t) + getResult.data_size, 0);
+                bytesSent = send(managerSock, getReply, sizeof(worker_get_rep_msg_t) + getResult->data_size, 0);
                 break;
             }
 
@@ -1222,83 +1217,6 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     /* FIXME: Do we need to wait and compare results here, or has that been done already? */
     /* Send GET_REQ message to node manager thread */
     send(this->clientSock, &getMsg, sizeof(getMsg), 0);
-
-    /* FIXME: Worker thread now collects responses. Don't need this */
-    /* Wait for responses from node manager thread */
-//    worker_get_rep_msg_t *getRep;
-//    value_t responses[DHT_REPLICATION];
-//    int num_responses = 0;
-//    zmq::pollitem_t pollSock[1];
-//    pollSock[0].socket = this->clientSock;
-//    pollSock[0].events = ZMQ_POLLIN;
-//    /* FIXME: need to have timeout */
-//    while(num_responses < DHT_REPLICATION) {
-//#ifdef NODE_DEBUG
-//        std::cout << "Node::get waiting for message." << std::endl;
-//#endif
-//        /* Poll on socket and check for timeout */
-//        result = zmq_poll(pollSock, 1, DEFAULT_TIMEOUT_MS);
-//        if(pollSock[0].revents <= 0){
-//            std::cout << "Node::get timeout while waiting for message." << std::endl;
-//            if (num_responses >= 3){
-//                break;
-//            }
-//            else{
-//                for (int i = 0; i < num_responses; i++){
-//                    free(responses[i].value_ptr);
-//                }
-//                return -1;
-//            }
-//        }
-//        this->clientSock->recv(&recvMsg);
-//        getRep = static_cast<worker_get_rep_msg_t *>(recvMsg.data());
-//
-//        if (getRep->digest == digest) {
-//            responses[num_responses].value_size = recvMsg.size() - sizeof(worker_get_rep_msg_t);
-//            responses[num_responses].value_ptr = malloc(responses[num_responses].value_size);
-//            if(responses[num_responses].value_ptr == nullptr){
-//                std::cout << "ERROR: Node::get failed to allocate memory for responses." << std::endl;
-//                for (int i = 0; i < num_responses; i++){
-//                    free(responses[i].value_ptr);
-//                }
-//                return -1;
-//            }
-//            memcpy(responses[num_responses].value_ptr, getRep->data, responses[num_responses].value_size);
-//        }
-//        else{
-//            /* FIXME: How to best handle this? */
-//            //std::cout << "ERROR: Node::get received response with incorrect hash key." << std::endl;
-//            //return -1;
-//        }
-//        num_responses++;
-//    }
-//
-//    value_t answer;
-//    result = checkConsensus(responses, DHT_REPLICATION, &answer);
-//    int tempInt;
-//    for (int i = 0; i < DHT_REPLICATION; i++){
-//        tempInt = *((int*)(responses[i].value_ptr));
-//        std::cout << "Response " << i << ": " << tempInt << std::endl;
-//        free(responses[i].value_ptr);
-//    }
-//    if (result != 0){
-//        /* TODO: Handle case with no consensus */
-//        std::cout << "ERROR: Node::get failed to reach a consensus." << std::endl;
-//        free(answer.value_ptr);
-//        return -1;
-//    }
-//    if (answer.value_size <= 0){
-//        /* TODO: Handle case */
-//        std::cout << "ERROR: Node::get received invalid answer data size." << std::endl;
-//        free(answer.value_ptr);
-//        return -1;
-//    }
-//    if (answer.value_ptr == nullptr){
-//        /* TODO: Handle case */
-//        std::cout << "ERROR: Node::get received null answer pointer." << std::endl;
-//        free(answer.value_ptr);
-//        return -1;
-//    }
 
     /* Receive response */
     /* FIXME: Mem leak occurs if this function does not return successfully. */
@@ -1490,121 +1408,34 @@ void print_digest(digest_t digest)
     std::cout << std::endl;
 }
 
-int checkConsensus(value_t* responses, int responseCnt, value_t* answer)
+template<typename TYPE>
+int checkConsensus(TYPE *entries, int entryCnt, TYPE **answer)
 {
+    if (entryCnt < 3) return -1; /* Should always be at least 3 entries */
+
     /* FIXME: Generalize for >4 */
-    /* FIXME: Check for null response data_ptr */
+    /* This is an embarrassingly bad algorithm and I am ashamed by it */
     int agreementCnt = 1;
-    int tempSize = responses[0].value_size;
-    void *tempPtr = responses[0].value_ptr;
-    for (int i = 1; i < 4; i++){
-        if (tempSize == responses[i].value_size) {
-            if (memcmp(tempPtr, responses[i].value_ptr, tempSize) == 0) {
+    for (int i = 1; i < entryCnt; i++){
+        if (entries[0] == entries[i]) agreementCnt++;
+    }
+
+    if (agreementCnt >= CONSENSUS_THRESHOLD){
+        *answer = &(entries[0]);
+    } else {
+        agreementCnt = 1;
+        if(entries[1] == entries[0]) {
+            agreementCnt++;
+        }
+        for (int i = 2; i < entryCnt; i++) {
+            if(entries[1] == entries[i]) {
                 agreementCnt++;
             }
         }
-    }
-    if (agreementCnt >= 3){
-        answer->value_size = tempSize;
-        answer->value_ptr = malloc(tempSize);
-        if(answer->value_ptr == nullptr){
-            std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
-            return -1;
-        }
-        memcpy(answer->value_ptr, tempPtr, tempSize);
-    }
-    else {
-        agreementCnt = 1;
-        tempSize = responses[1].value_size;
-        tempPtr = responses[1].value_ptr;
-        if (tempSize == responses[0].value_size) {
-            if (memcmp(tempPtr, responses[0].value_ptr, tempSize) == 0) {
-                agreementCnt++;
-            }
-        }
-        for (int i = 2; i < 4; i++) {
-            if (tempSize == responses[i].value_size) {
-                if (memcmp(tempPtr, responses[i].value_ptr, tempSize) == 0) {
-                    agreementCnt++;
-                }
-            }
-        }
-        if (agreementCnt >= 3) {
-            answer->value_size = tempSize;
-            answer->value_ptr = malloc(tempSize);
-            if(answer->value_ptr == nullptr){
-                std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
-                return -1;
-            }
-            memcpy(answer->value_ptr, tempPtr, tempSize);
+        if (agreementCnt >= CONSENSUS_THRESHOLD) {
+            *answer = &(entries[1]);
         } else {
-            /* No agreement on data size */
-            return -1;
-        }
-    }
-
-    return 0;
-}
-
-int checkEntryConsensus(table_entry_t* responses, int responseCnt, table_entry_t* answer)
-{
-    /* FIXME: Generalize for >4 */
-    /* FIXME: Return pointer to element in responses. Don't malloc new memory */
-    int agreementCnt = 1;
-    digest_t tempDigest = responses[0].digest;
-    int tempSize = responses[0].data_size;
-    void *tempPtr = responses[0].data_ptr;
-    for (int i = 1; i < 4; i++){
-        if(tempDigest == responses[i].digest) {
-            if (tempSize == responses[i].data_size) {
-                if (memcmp(tempPtr, responses[i].data_ptr, tempSize) == 0) {
-                    agreementCnt++;
-                }
-            }
-        }
-    }
-    if (agreementCnt >= 3){
-        answer->data_size = tempSize;
-        answer->data_ptr = malloc(tempSize);
-        if(answer->data_ptr == nullptr){
-            std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
-            return -1;
-        }
-        memcpy(answer->data_ptr, tempPtr, tempSize);
-        answer->digest = tempDigest;
-    }
-    else {
-        agreementCnt = 1;
-        tempDigest = responses[1].digest;
-        tempSize = responses[1].data_size;
-        tempPtr = responses[1].data_ptr;
-        if(tempDigest == responses[0].digest) {
-            if (tempSize == responses[0].data_size) {
-                if (memcmp(tempPtr, responses[0].data_ptr, tempSize) == 0) {
-                    agreementCnt++;
-                }
-            }
-        }
-        for (int i = 2; i < 4; i++) {
-            if(tempDigest == responses[i].digest) {
-                if (tempSize == responses[i].data_size) {
-                    if (memcmp(tempPtr, responses[i].data_ptr, tempSize) == 0) {
-                        agreementCnt++;
-                    }
-                }
-            }
-        }
-        if (agreementCnt >= 3) {
-            answer->data_size = tempSize;
-            answer->data_ptr = malloc(tempSize);
-            if(answer->data_ptr == nullptr){
-                std::cout << "ERROR: checkConsensus failed to allocate memory" << std::endl;
-                return -1;
-            }
-            memcpy(answer->data_ptr, tempPtr, tempSize);
-            answer->digest = tempDigest;
-        } else {
-            /* No agreement on data size */
+            /* No consensus */
             return -1;
         }
     }

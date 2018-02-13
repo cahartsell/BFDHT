@@ -24,6 +24,7 @@
 #define INIT_WORKER_THREAD_CNT      10
 
 #define DHT_REPLICATION 4
+#define CONSENSUS_THRESHOLD 3
 #define NUM_NODES 4
 
 #define PORT_STR "8476"
@@ -53,21 +54,6 @@ enum pollIds{
     CLIENT_CMD = 11,
     POLL_IDS_SIZE = 12
 };
-
-
-/* Data type for elements stored in the Hash Table */
-typedef struct value_t{
-    value_t() : value_ptr(nullptr), value_size(0) {}    /* Constructor & default values */
-    void* value_ptr;                                    /* Pointer to start of value data */
-    int value_size;                                     /* Size of data stored at value_ptr in bytes */
-} value_t;
-
-typedef struct table_entry_t {
-    table_entry_t() : data_ptr(nullptr), data_size(0) {}
-    void* data_ptr;
-    size_t data_size;
-    digest_t digest;
-} table_entry_t;
 
 /* Data type passed to main thread */
 typedef struct manager_thread_data_t {
