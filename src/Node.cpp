@@ -850,6 +850,12 @@ void* Node::workerMain(void* arg)
                 memcpy(repMsg->data, data, dataSize);
                 free(data);
 
+                /********** DEBUGGING PRINT STATEMENTS ***************/
+                sockaddr_in *temp = (sockaddr_in*)(&newJobMsg.reqAddr);
+                char* ip = inet_ntoa(temp->sin_addr);
+                std::cout << "IP: " <<  ip << ":" << temp->sin_port << " " << temp->sin_family << std::endl;
+                std::cout << newJobMsg.addrLen << std::endl;
+
                 /* Send back reply */
                 bytesSent = sendto(outSock, repMsg, repSize, 0,
                                   (sockaddr*)&newJobMsg.reqAddr, newJobMsg.addrLen);
@@ -967,6 +973,7 @@ void* Node::workerMain(void* arg)
                             tempRep = static_cast<worker_put_rep_msg_t*>(buf);
 
                             peerReplies[numResponses].result = tempRep->result;
+                            peerReplies[numResponses].digest = tempRep->digest;
                             numResponses++;
                         }
                         else{
@@ -976,15 +983,19 @@ void* Node::workerMain(void* arg)
                 }
 
                 worker_put_rep_msg_t *putReply;
+                putReply = &peerReplies[0];
                 if (numResponses >= CONSENSUS_THRESHOLD){
                     rv = checkConsensus(peerReplies, numResponses, &putReply);
                     if (rv != 0){
                         logMsg("Put replies did not agree.");
                         putReply->result = false;
                     }
-                    putReply->msgType = MSG_TYPE_PUT_DATA_REP;
+                } else {
+                    putReply->result = false;
                 }
-                bytesSent = send(managerSock, &putReply, sizeof(putReply), 0);
+
+                putReply->msgType = MSG_TYPE_PUT_DATA_REP;
+                bytesSent = send(managerSock, putReply, sizeof(worker_put_rep_msg_t), 0);
                 break;
             }
 
@@ -1096,13 +1107,15 @@ void* Node::workerMain(void* arg)
                 /* Check for consensus */
                 worker_get_rep_msg_t *getReply;
                 table_entry_t *getResult;
+                size_t dataSize = 0;
                 getReply = static_cast<worker_get_rep_msg_t*>(buf);
                 getReply->msgType = MSG_TYPE_GET_DATA_REP;
-                if (numResponses >= DHT_REPLICATION - 1) {
+                if (numResponses >= CONSENSUS_THRESHOLD) {
                     rv = checkConsensus(peerValues, numResponses, &getResult);
                     if (rv == 0) {
                         getReply->digest = getResult->digest;
-                        memcpy(getReply->data, getResult->data_ptr, getResult->data_size);
+                        dataSize = getResult->data_size;
+                        memcpy(getReply->data, getResult->data_ptr, dataSize);
                     }
                     else {
                         /* FIXME: Return get failed? */
@@ -1113,7 +1126,7 @@ void* Node::workerMain(void* arg)
 
                 /* TODO: Evaluate responses and send data back to client here */
 
-                bytesSent = send(managerSock, getReply, sizeof(worker_get_rep_msg_t) + getResult->data_size, 0);
+                bytesSent = send(managerSock, getReply, sizeof(worker_get_rep_msg_t) + dataSize, 0);
                 break;
             }
 
@@ -1153,10 +1166,8 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
     }
 
     /* Fill out message */
-    /* FIXME: Topic no longer used */
     putMsg->msgType = MSG_TYPE_PUT_DATA_REQ;
     putMsg->digest = digest;
-    memcpy(putMsg->sender, myTopic, sizeof(putMsg->sender)); //FIXME: MY IP
     memcpy(putMsg->data, data_ptr, data_bytes);
 
     send(this->clientSock, putMsg, msgSize, 0);
@@ -1181,7 +1192,7 @@ int Node::put(std::string key_str, void* data_ptr, int data_bytes)
         perror("Client to manager socket is disconnected.");
         return -1;
     }
-    if (bytesRead < sizeof(worker_get_rep_msg_t)){
+    if (bytesRead < sizeof(worker_put_rep_msg_t)){
         perror("Client received unexpected message size instead of put reply.");
         return -1;
     }
@@ -1212,7 +1223,6 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     worker_get_req_msg_t getMsg;
     getMsg.msgType = MSG_TYPE_GET_DATA_REQ;
     getMsg.digest = digest;
-    memcpy(getMsg.sender, myTopic, MSG_TOPIC_SIZE);
 
     /* FIXME: Do we need to wait and compare results here, or has that been done already? */
     /* Send GET_REQ message to node manager thread */
@@ -1492,7 +1502,7 @@ int findWorkerWithSock(std::vector<worker_t>::iterator* in_worker, std::vector<w
 
 int sendShutdown(int sock, pthread_t thread, int timeout_ms)
 {
-
+    /* FIXME: Something in this function makes valgrind panic claiming SIGSEGV */
     /* Distribute shutdown message to workers */
     msg_header_t tempHeader;
     tempHeader.msgType = MSG_TYPE_THREAD_SHUTDOWN;
@@ -1506,7 +1516,7 @@ int sendShutdown(int sock, pthread_t thread, int timeout_ms)
 
     bytesSent = send(sock, &tempHeader, sizeof(tempHeader), 0);
 
-    if (bytesSent != sizeof(tempHeader)) {
+    if (bytesSent != sizeof(msg_header_t)) {
         /* Message send failed. Send cancel request. */
         perror("Failed sending shutdown message to thread. Sending cancel");
         pthread_cancel(thread);

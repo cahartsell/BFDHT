@@ -27,23 +27,17 @@
 #define MSG_TYPE_COMMIT             0x0A
 
 typedef struct msg_header_t{
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     char data[];
 } msg_header_t;
 
 typedef struct worker_msg_header_t{
     worker_msg_header_t() : msgType((uint16_t)0) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
 } worker_msg_header_t;
 
 typedef struct worker_put_req_msg_t {
     worker_put_req_msg_t() : msgType(MSG_TYPE_PUT_DATA_REQ) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char data[];
@@ -51,8 +45,6 @@ typedef struct worker_put_req_msg_t {
 
 typedef struct worker_put_rep_msg_t {
     worker_put_rep_msg_t() : msgType(MSG_TYPE_PUT_DATA_REP) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char result;
@@ -71,8 +63,6 @@ typedef struct worker_put_rep_msg_t {
 
 typedef struct worker_pre_prepare_t {
     worker_pre_prepare_t() : msgType(MSG_TYPE_PRE_PREPARE) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char peers[3][IP_ADDR_SIZE];
@@ -81,24 +71,18 @@ typedef struct worker_pre_prepare_t {
 
 typedef struct worker_get_req_msg_t {
     worker_get_req_msg_t() : msgType(MSG_TYPE_GET_DATA_REQ) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
 } worker_get_req_msg_t;
 
 typedef struct worker_get_fwd_msg_t {
     worker_get_fwd_msg_t() : msgType(MSG_TYPE_GET_DATA_FWD) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
 } worker_get_fwd_msg_t;
 
 typedef struct worker_get_rep_msg_t {
     worker_get_rep_msg_t() : msgType(MSG_TYPE_GET_DATA_REP) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char data[];
@@ -106,8 +90,6 @@ typedef struct worker_get_rep_msg_t {
 
 typedef struct worker_prepare_t {
     worker_prepare_t() : msgType(MSG_TYPE_PREPARE) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char data[];
@@ -115,8 +97,6 @@ typedef struct worker_prepare_t {
 
 typedef struct worker_commit_t {
     worker_commit_t() : msgType(MSG_TYPE_COMMIT) {}
-    char msgTopic[MSG_TOPIC_SIZE];
-    char sender[IP_ADDR_SIZE];
     uint16_t msgType;
     digest_t digest;
     char data[];
