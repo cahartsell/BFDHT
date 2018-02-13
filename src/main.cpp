@@ -17,31 +17,52 @@ int main() {
     auto node = new Node();
     node->startup();
 
-    std::string userIn, key, valStr;
-    int value, *valPtr;
+    std::string userIn = "";
+    std::string key, valStr;
+    int value, *valPtr, rv;
     size_t data_size;
 
     while(1){
         std::cout << "Waiting for command: " << std::endl;
-        std::cin >> userIn;
-        //std::cout << "Got input: " << userIn << std::endl;
+        /* FIXME: Occasionally SEGFAULT occurred when cin is read into string.
+         * Using std::getline instead of std::cin >> seems to have fixed this */
+        /* No idea why garbage in cin buffer could cause seg fault */
+        std::cin.clear();
+        std::getline(std::cin, userIn);
+        std::cout << "Got input: " << userIn << std::endl;
 
         if(userIn.compare("get") == 0){
             std::cout << "Waiting for key: " << std::endl;
             std::cin >> key;
-            node->get(key, (void**)&valPtr, (int*)&data_size);
-            value = *valPtr;
-            std::cout << "Got: " << value << std::endl;
+            rv = node->get(key, (void**)&valPtr, (int*)&data_size);
+            if (rv == 0) {
+                value = *valPtr;
+                std::cout << "Got: " << value << std::endl;
+            }
+            else{
+                std::cout << "Node get failed." << std::endl;
+            }
         }
         else if(userIn.compare("put") == 0) {
             std::cout << "Waiting for key: " << std::endl;
             std::cin >> key;
             std::cin >> valStr;
             value = std::stoi(valStr);
-            node->put(key, &value, sizeof(value));
+            rv = node->put(key, &value, sizeof(value));
+            if (rv == 0) {
+                std::cout << "Put successful." << std::endl;
+            }
+            else{
+                std::cout << "Node put failed." << std::endl;
+            }
         }
         else if(userIn.compare("shutdown") == 0) {
-            node->shutdown();
+            rv = node->shutdown();
+            if (rv == 0){
+                std::cout << "Node shutdown successful." << std::endl;
+            } else{
+                std::cout << "Node did not shutdown cleanly." << std::endl;
+            }
             break;
         }
     }
