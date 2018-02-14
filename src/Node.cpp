@@ -266,22 +266,46 @@ void* Node::manager(void *arg)
             msgHeader = static_cast<msg_header_t*>(buf);
             switch (msgHeader->msgType) {
                 case MSG_TYPE_PREPARE:
-                case MSG_TYPE_COMMIT: {
+                case MSG_TYPE_COMMIT:
+                case MSG_TYPE_PRE_PREPARE:{
                     worker_prepare_t *tempMsg;
+                    worker_t *keyWorker;
                     tempMsg = static_cast<worker_prepare_t*>(buf);
-
-                    worker_t *tempWorker;
-                    rv = findWorkerWithKey(&tempWorker, busyWorkers, tempMsg->digest);
+                    rv = findWorkerWithKey(&keyWorker, busyWorkers, tempMsg->digest);
 
                     if (rv != 0) {
-                        /* Didn't find worker with given key */
-                        /* FIXME: How to handle this? */
-                        logMsg("Failed to find busy worker with desired key");
-                        break;
+                        /* Didn't find worker with given key. Must be start of new PBFT exchange */
+                        /* NOTE: We allow prepare or commit msg to signal the start of a PBFT exchange since
+                         * other nodes in the system may get ahead of us in the message exchange, so
+                         * it is possible to receive prepare or commit before pre-prepare */
+
+                        if (availableWorkers.size() == 0) {
+                            /* TODO: How to handle this? */
+                            logMsg("All workers busy. Dropping request.");
+                            break;
+                        }
+
+                        /* Configure tempWorker. Start of PBFT exchange, so save digest */
+                        worker_t tempWorker;
+                        tempWorker.sock = availableWorkers.back();
+                        tempWorker.currentKey = tempMsg->digest;
+
+                        /* Update available/busy workers vectors */
+                        /* Workers performing a client request are stored in their own vector "clientWorkers" */
+                        availableWorkers.pop_back();
+                        busyWorkers.push_back(tempWorker);
+
+                        /* Send start of new job message to appropriate worker */
+                        worker_new_job_msg_t newJob;
+                        newJob.reqAddr = fromAddr;
+                        newJob.addrLen = fromLen;
+                        send(tempWorker.sock, &newJob, sizeof(newJob), 0);
+
+                        keyWorker = &tempWorker;
                     }
 
                     /* Forward message to appropriate worker */
-                    send(tempWorker->sock, buf, (size_t) bytesRead, 0);
+                    send(keyWorker->sock, buf, (size_t) bytesRead, 0);
                     break;
                 }
 
@@ -305,11 +329,8 @@ void* Node::manager(void *arg)
                     break;
                 }
 
-                case MSG_TYPE_THREAD_SHUTDOWN:
                 case MSG_TYPE_PUT_DATA_REQ:
                 case MSG_TYPE_GET_DATA_REQ:
-                case MSG_TYPE_PRE_PREPARE:
-                case MSG_TYPE_WORKER_FINISHED:
                 case MSG_TYPE_GET_DATA_FWD: {
                     if (availableWorkers.size() == 0) {
                         /* FIXME: How to handle this? */
@@ -320,12 +341,7 @@ void* Node::manager(void *arg)
                     /* Configure tempWorker */
                     worker_t tempWorker;
                     tempWorker.sock = availableWorkers.back();
-                    if (msgHeader->msgType == MSG_TYPE_PRE_PREPARE) {
-                        /* Start of PBFT exchange. Store digest (key) to busyWorkers */
-                        worker_pre_prepare_t *tempMsg;
-                        tempMsg = static_cast<worker_pre_prepare_t *>(buf);
-                        tempWorker.currentKey = tempMsg->digest;
-                    }
+
                     /* Update available/busy workers vectors */
                     /* Workers performing a client request are stored in their own vector "clientWorkers" */
                     availableWorkers.pop_back();
@@ -637,7 +653,7 @@ void* Node::workerMain(void* arg)
                         /* Handle message or store data for later as appropriate */
                         auto *tempHeader = static_cast<msg_header_t*>(buf);
                         size_t dataSize;
-                        if (tempHeader->msgType == MSG_TYPE_PRE_PREPARE) {
+                        if (tempHeader->msgType == MSG_TYPE_PRE_PREPARE && !preprepareHandled) {
                             /* Pre-prepare message can be handled immediately */
                             logMsg("Handling a pre-prepare message.");
 
@@ -790,7 +806,7 @@ void* Node::workerMain(void* arg)
                 worker_put_rep_msg_t reply;
                 reply.msgType = MSG_TYPE_PUT_DATA_REP;
                 if(commitSuccess){
-                    /* This should be a given, but CLion complains */
+                    /* This should be a given, but CLion gives a warning */
                     if (commitResult != nullptr) reply.digest = commitResult->digest;
                     reply.result = true;
                     logMsg("Finished storing data.");
