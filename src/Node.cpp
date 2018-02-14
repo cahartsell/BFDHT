@@ -514,11 +514,12 @@ void* Node::workerMain(void* arg)
     }
 
     int i;
-    table_entry_t peerValues[DHT_REPLICATION];
+    table_entry_t prepareValues[DHT_REPLICATION], commitValues[DHT_REPLICATION];
     for(i = 0; i < DHT_REPLICATION; i++){
-        peerValues[i].data_ptr = malloc(MAX_DATA_SIZE);
-        if (peerValues[i].data_ptr == nullptr){
-            perror("Worker failed to allocate memory for incoming data values");
+        prepareValues[i].data_ptr = malloc(MAX_DATA_SIZE);
+        commitValues[i].data_ptr = malloc(MAX_DATA_SIZE);
+        if (prepareValues[i].data_ptr == nullptr || commitValues[i].data_ptr == nullptr){
+            perror("Worker failed to allocate memory for incoming peer message values");
             running = false;
         }
     }
@@ -548,7 +549,6 @@ void* Node::workerMain(void* arg)
     /* Signal init complete */
     pthread_barrier_wait(args->barrier);
 
-    int sendDone = true, success;
     worker_new_job_msg_t newJobMsg;
     msg_header_t *msgHeader;
     std::string readyStr = "READY";
@@ -596,140 +596,219 @@ void* Node::workerMain(void* arg)
                 /* FIXME: Do any cleanup here */
                 break;
 
+            case MSG_TYPE_PREPARE:
+            case MSG_TYPE_COMMIT:
             case MSG_TYPE_PRE_PREPARE: {
                 /* FIXME: Cleanup memory management. Minimize use of malloc */
-                logMsg("Handling pre-prepare message");
-                success = false;
-                size_t dataSize = bytesRead - sizeof(worker_pre_prepare_t);
-                worker_pre_prepare_t *ppMsg;
-                ppMsg = static_cast<worker_pre_prepare_t*>(buf);
-
-                /* Setup peer addresses */
-                std::string peerIP;
-                for (i = 0; i < DHT_REPLICATION - 1; i++){
-                    peerIP = ipCharArrayToStr(ppMsg->peers[i], IP_ADDR_SIZE);
-                    rv = inet_aton(peerIP.c_str(), &(outAddr[i].sin_addr));
+                int prepareRecvCnt = 0, commitRecvCnt = 0, timeout = false;
+                int preprepareHandled = false, prepareSuccess = false, commitSuccess = false, continuePoll = true;
+                table_entry_t *commitResult = nullptr;
+                while(1){
+                    rv = poll(&managerSockPoll, 1, DEFAULT_WORKER_TIMEOUT_MS);
                     if (rv == 0){
-                        perror("inet_aton() failed interpreting peer IP.");
+                        // Timeout occured
+                        /* TODO: Gracefully handle timeout */
+                        timeout = true;
+                    }
+                    if (rv < 0){
+                        perror("recvPeerReplies() encountered error while polling socket");
                         break;
                     }
-                }
 
-                /* Construct prepare messages */
-                worker_prepare_t *pMsg;
-                size_t prepareSize = sizeof(worker_prepare_t) + dataSize;
-                pMsg = (worker_prepare_t *) malloc(prepareSize);
-                if (pMsg == nullptr){
-                    perror("Worker failed to allocate memory for prepare message.");
-                    break;
-                }
-                memcpy(pMsg->data, ppMsg->data, dataSize);
-                pMsg->digest = ppMsg->digest;
-                pMsg->msgType = MSG_TYPE_PREPARE;
+                    /* FIXME: Make sure each peer only replies once */
+                    if(managerSockPoll.revents & POLLIN) {
+                        bytesRead = recv(managerSockPoll.fd, buf, bufSize, MSG_DONTWAIT);
+                        if (bytesRead < 0){
+                            if(errno == EAGAIN || errno == EWOULDBLOCK){
+                                /* No message ready */
+                                perror("Worker tried to read empty buffer on manager socket");
+                                break;
+                            }
+                            else{
+                                perror("Worker encountered error receiving from manager socket");
+                                break;
+                            }
+                        }
+                        else if (bytesRead < sizeof(msg_header_t)){
+                            perror("Worker received undersized message");
+                            continue;
+                        }
 
-                /* Send prepare messages */
-                for (i = 0; i < DHT_REPLICATION - 1; i++){
-                    logMsg("Sending prepare message");
-                    bytesSent = sendto(outSock, pMsg, prepareSize, 0,
-                                       (sockaddr*) &(outAddr[i]), outAddrLen);
-                    if (bytesSent < 0) {
-                        perror("Worker failed sending out prepare message.");
-                        continue;
+                        /* Handle message or store data for later as appropriate */
+                        auto *tempHeader = static_cast<msg_header_t*>(buf);
+                        size_t dataSize;
+                        if (tempHeader->msgType == MSG_TYPE_PRE_PREPARE) {
+                            /* Pre-prepare message can be handled immediately */
+                            logMsg("Handling a pre-prepare message.");
+
+                            auto ppMsg = static_cast<worker_pre_prepare_t*>(buf);
+                            dataSize = bytesRead - sizeof(worker_pre_prepare_t);
+
+                            /* Setup peer addresses */
+                            std::string peerIP;
+                            for (i = 0; i < DHT_REPLICATION - 1; i++){
+                                peerIP = ipCharArrayToStr(ppMsg->peers[i], IP_ADDR_SIZE);
+                                rv = inet_aton(peerIP.c_str(), &(outAddr[i].sin_addr));
+                                if (rv == 0){
+                                    perror("inet_aton() failed interpreting peer IP.");
+                                    break;
+                                }
+                            }
+
+                            /* Construct prepare messages */
+                            worker_prepare_t *pMsg;
+                            size_t prepareSize = sizeof(worker_prepare_t) + dataSize;
+                            pMsg = (worker_prepare_t *) malloc(prepareSize);
+                            if (pMsg == nullptr){
+                                perror("Worker failed to allocate memory for prepare message.");
+                                break;
+                            }
+                            memcpy(pMsg->data, ppMsg->data, dataSize);
+                            pMsg->digest = ppMsg->digest;
+                            pMsg->msgType = MSG_TYPE_PREPARE;
+
+                            /* Send prepare messages */
+                            for (i = 0; i < DHT_REPLICATION - 1; i++){
+                                logMsg("Sending prepare message");
+                                bytesSent = sendto(outSock, pMsg, prepareSize, 0,
+                                                   (sockaddr*) &(outAddr[i]), outAddrLen);
+                                if (bytesSent < 0) {
+                                    perror("Worker failed sending out prepare message.");
+                                    continue;
+                                }
+                            }
+
+                            /* FIXME: Need to ensure prepareRecvCnt and commitRecvCnt stay in range */
+                            /* Init self prepare value */
+                            prepareValues[prepareRecvCnt].digest = pMsg->digest;
+                            prepareValues[prepareRecvCnt].data_size = dataSize;
+                            memcpy(prepareValues[prepareRecvCnt].data_ptr, pMsg->data, dataSize);
+                            prepareRecvCnt++;
+                            free(pMsg);
+                            preprepareHandled = true;
+                        }
+                        else if (tempHeader->msgType == MSG_TYPE_PREPARE && !preprepareHandled) {
+                            logMsg("Storing a prepare message.");
+                            auto tempPtr = static_cast<worker_prepare_t*>(buf);
+                            dataSize = bytesRead - sizeof(worker_prepare_t);
+                            prepareValues[prepareRecvCnt].digest = tempPtr->digest;
+                            prepareValues[prepareRecvCnt].data_size = dataSize;
+                            memcpy(prepareValues[prepareRecvCnt].data_ptr, tempPtr->data, dataSize);
+                            prepareRecvCnt++;
+                        }
+                        else if (tempHeader->msgType == MSG_TYPE_COMMIT) {
+                            logMsg("Storing a commit message.");
+                            auto tempPtr = static_cast<worker_commit_t*>(buf);
+                            dataSize = bytesRead - sizeof(worker_commit_t);
+                            commitValues[commitRecvCnt].digest = tempPtr->digest;
+                            commitValues[commitRecvCnt].data_size = dataSize;
+                            memcpy(commitValues[commitRecvCnt].data_ptr, tempPtr->data, dataSize);
+                            commitRecvCnt++;
+                        }
+                        else {
+                            logMsg("Throwing away unrelated message");
+                        }
                     }
-                }
 
-                /* Init self value */
-                peerValues[0].digest = pMsg->digest;
-                peerValues[0].data_size = dataSize;
-                memcpy(peerValues[0].data_ptr, pMsg->data, dataSize);
-                free(pMsg);
+                    /* If we've recv'd and handled the pre-prepare, recv'd enough prepare messages,
+                     * but have not yet handled them, then handle prepare messages now. */
+                    if (preprepareHandled && !prepareSuccess && prepareRecvCnt >= CONSENSUS_THRESHOLD){
+                        if(!timeout && prepareRecvCnt < DHT_REPLICATION) {
+                            /* Haven't timed out yet. Keep listening for more prepare messages */
+                            continue;
+                        }
 
-                /* Collect incoming prepare messages*/
-                int numResponses = 1;
-                rv = recvPeerReplies<worker_prepare_t>(&managerSockPoll, buf, bufSize, &(peerValues[1]),
-                                                       DHT_REPLICATION - 1, DEFAULT_WORKER_TIMEOUT_MS);
-                if (rv < 0) {
-                    /* FIXME: What else needs to happen here? Send some reply? */
-                    perror("Worker failed to recv prepare messages.");
-                    break;
-                }
+                        /* We've either received all prepare messages or timed-out, so check for consensus */
+                        /* Check if received prepare messages agree */
+                        table_entry_t *prepareResult;
+                        rv = checkConsensus(prepareValues, prepareRecvCnt, &prepareResult);
+                        if (rv != 0) {
+                            logMsg("No consensus among prepare messages.");
+                            break;
+                        }
 
-                numResponses += rv;
-                std::cout << rv << std::endl;
-                if (numResponses < CONSENSUS_THRESHOLD){
-                    /* FIXME: What else needs to happen here? */
-                    logMsg("Worker did not receive enough prepare messages.");
-                    break;
-                }
+                        size_t commitSize = sizeof(worker_commit_t) + prepareResult->data_size;
+                        if (commitSize > bufSize){
+                            perror("Worker commit message size exceeds maximum buffer size.");
+                            break;
+                        }
+                        worker_commit_t *cMsg = static_cast<worker_commit_t*>(buf);
+                        memcpy(cMsg->data, prepareResult->data_ptr, prepareResult->data_size);
+                        cMsg->digest = prepareResult->digest;
+                        cMsg->msgType = MSG_TYPE_COMMIT;
 
-                /* Check if received prepare messages agree and free memory */
-                table_entry_t *prepareResult;
-                rv = checkConsensus(peerValues, numResponses, &prepareResult);
-                if (rv != 0) {
-                    perror("Prepare Consensus Failed! Aborting...");
-                    break;
-                }
+                        for (i = 0; i < DHT_REPLICATION - 1; i++){
+                            logMsg("Sending commit message");
+                            bytesSent = sendto(outSock, cMsg, commitSize, 0,
+                                               (sockaddr*) &(outAddr[i]), outAddrLen);
+                        }
 
-                size_t commitSize = sizeof(worker_commit_t) + prepareResult->data_size;
-                if (commitSize > bufSize){
-                    perror("Worker commit message size exceeds maximum buffer size.");
-                    break;
-                }
-                worker_commit_t *cMsg = static_cast<worker_commit_t*>(buf);
-                memcpy(cMsg->data, prepareResult->data_ptr, prepareResult->data_size);
-                cMsg->digest = prepareResult->digest;
-                cMsg->msgType = MSG_TYPE_COMMIT;
+                        /* Set self commit value */
+                        commitValues[commitRecvCnt].digest = cMsg->digest;
+                        commitValues[commitRecvCnt].data_size = prepareResult->data_size;
+                        memcpy(commitValues[commitRecvCnt].data_ptr, cMsg->data, prepareResult->data_size);
+                        commitRecvCnt++;
+                        prepareSuccess = true;
+                        timeout = false;
+                    }
 
-                for (i = 0; i < DHT_REPLICATION - 1; i++){
-                    logMsg("Sending commit message");
-                    bytesSent = sendto(outSock, cMsg, commitSize, 0,
-                                       (sockaddr*) &(outAddr[i]), outAddrLen);
-                }
+                    /* If prepare messages have been successfully handled and we have received
+                     * enough commit messages, then try to handle them now.
+                     * Note: prepareSuccess implies prepreparedHandled, so we don't have to check that.
+                     * Also, we break after commit is handled, so don't need to check commitSuccess either. */
+                    if (prepareSuccess && commitRecvCnt >= CONSENSUS_THRESHOLD){
+                        if(!timeout && prepareRecvCnt < DHT_REPLICATION) {
+                            /* Haven't timed out yet. Keep listening for more commit messages */
+                            continue;
+                        }
 
-                /* Reset self value. May have changed after prepare stage */
-                peerValues[0].digest = cMsg->digest;
-                peerValues[0].data_size = dataSize;
-                memcpy(peerValues[0].data_ptr, cMsg->data, dataSize);
+                        /* We've either received all commit messages or timed-out, so check for consensus */
 
-                /* Wait for incoming commit messages */
-                numResponses = 1;
-                rv = recvPeerReplies<worker_commit_t>(&managerSockPoll, buf, bufSize, &(peerValues[1]),
-                                                      DHT_REPLICATION - 1, DEFAULT_WORKER_TIMEOUT_MS);
-                if (rv < 0){
-                    /* FIXME: What else needs to happen here? Send some reply? */
-                    perror("Worker failed to recv commit replies.");
-                    break;
-                }
+                        /* Check if received commit messages agree */
+                        rv = checkConsensus(commitValues, commitRecvCnt, &commitResult);
 
-                numResponses += rv;
-                if (numResponses < CONSENSUS_THRESHOLD){
-                    /* FIXME: What else needs to happen here? Send some reply? */
-                    logMsg("Worker did not receive enough commit messages.");
-                    break;
-                }
+                        if (rv == 0) {
+                            logMsg("Storing data...");
+                            context->localPut(commitResult->digest, commitResult->data_ptr, commitResult->data_size);
+                            commitSuccess = true;
+                            timeout = false;
+                        } else {
+                            logMsg("Failed to reach consensus during commit stage. Aborting put.");
+                            break;
+                        }
+                        break;
+                    }
 
-                /* Check if received commit messages agree */
-                table_entry_t *commitResult;
-                rv = checkConsensus(peerValues, numResponses, &commitResult);
-
-                if (rv == 0) {
-                    logMsg("Storing data...");
-                    context->localPut(commitResult->digest, commitResult->data_ptr, commitResult->data_size);
-                    success = true;
-                } else {
-                    logMsg("Failed to reach consensus during commit stage. Aborting put.");
-                    break;
+                    if (timeout) {
+                        /* Timeout was set and no other handler cleared it so PBFT exchange failed */
+                        logMsg("Timeout occurred waiting for peer messages.");
+                        break;
+                    }
                 }
 
                 // Send reply to pre-prepare originating node
                 worker_put_rep_msg_t reply;
                 reply.msgType = MSG_TYPE_PUT_DATA_REP;
-                reply.digest = commitResult->digest;
-                if(success){
+                if(commitSuccess){
+                    /* This should be a given, but CLion complains */
+                    if (commitResult != nullptr) reply.digest = commitResult->digest;
                     reply.result = true;
                     logMsg("Finished storing data.");
                 }
                 else{
+                    if(!preprepareHandled){
+                        logMsg("Pre-prepare message not handled successfully.");
+                    } else if (!prepareSuccess){
+                        logMsg("Did not reach consensus with prepare messages.");
+                        if(prepareRecvCnt < CONSENSUS_THRESHOLD){
+                            logMsg("Did not receive enough prepare messages.");
+                        }
+                    } else if(commitRecvCnt < CONSENSUS_THRESHOLD) {
+                        logMsg("Did not receive enough commit messages.");
+                    }
+
+                    /* FIXME: PBFT failed, but still need to give best guess at requested digest.
+                     * Include this in the NewJobMsg? */
                     reply.result = false;
                     logMsg("Failed storing data.");
                 }
@@ -748,7 +827,7 @@ void* Node::workerMain(void* arg)
 
 
             /******************************************
-             * FIXME: GET_REQ and PUT_REQ need to send pre-prepare to self first.
+             * FIXME: PUT_REQ need to send pre-prepare to self first.
              * If they don't, other node may reply with prepare message before local
              */
             case MSG_TYPE_GET_DATA_FWD: {
@@ -978,7 +1057,7 @@ void* Node::workerMain(void* arg)
                 }
 
                 int numResponses = 0;
-                rv = recvPeerReplies<worker_get_rep_msg_t>(&managerSockPoll, buf, bufSize, &(peerValues[0]),
+                rv = recvPeerReplies<worker_get_rep_msg_t>(&managerSockPoll, buf, bufSize, &(commitValues[0]),
                                                            DHT_REPLICATION, DEFAULT_WORKER_TIMEOUT_MS);
                 if (rv < 0) {
                     /* FIXME: What else needs to happen here? Send some reply? */
@@ -993,7 +1072,7 @@ void* Node::workerMain(void* arg)
                 size_t dataSize = 0;
                 getReply->msgType = MSG_TYPE_GET_DATA_REP;
                 if (numResponses >= CONSENSUS_THRESHOLD) {
-                    rv = checkConsensus(peerValues, numResponses, &getResult);
+                    rv = checkConsensus(commitValues, numResponses, &getResult);
                     if (rv == 0) {
                         getReply->digest = getResult->digest;
                         dataSize = getResult->data_size;
@@ -1021,7 +1100,8 @@ void* Node::workerMain(void* arg)
     /* TODO: Other cleanup */
     free(buf);
     for (i = 0; i < DHT_REPLICATION; i++){
-        free(peerValues->data_ptr);
+        free(commitValues->data_ptr);
+        free(prepareValues->data_ptr);
     }
     close(managerSock);
     pthread_exit(0);
@@ -1261,15 +1341,17 @@ int Node::computeDigest(std::string key_str, digest_t* digest)
 {
     /* Convert key std::string to C-string */
     unsigned long key_size = key_str.length() + 1;
-    if (key_size > MAX_KEY_LEN){
+    if (key_str.length() > MAX_KEY_LEN){
+        logMsg("computeDigest received key string longer than MAX_KEY_LEN");
         return -1;
     }
-    /* FIXME: Is there a reason I do this instead of passing .c_str() directly to hasher? */
-    char key[key_size];
-    std::strcpy(key, key_str.c_str());
+    if (key_str.length() <= 0){
+        logMsg("computeDigest received key string of length 0 (or negative).");
+        return -1;
+    }
 
     /* Use hashing function on value to calculate digest */
-    this->hash.CalculateDigest(digest->bytes, (byte*)key, key_size);
+    this->hash.CalculateDigest(digest->bytes, (byte*)key_str.c_str(), key_size);
 
 #ifdef NODE_DEBUG
     print_digest(*digest);
