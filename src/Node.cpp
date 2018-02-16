@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <poll.h>
+#include <signal.h>
 
 #include "Node.h"
 
@@ -20,7 +21,7 @@ std::string ipCharArrayToStr(char *ip, size_t ip_len);
 int logMsg(std::string msg);
 int findWorkerWithKey(worker_t** in_worker, std::vector<worker_t> &workers, digest_t &key);
 int findWorkerWithSock(std::vector<worker_t>::iterator* in_worker, std::vector<worker_t> &workers, int sock);
-int sendShutdown(int sock, pthread_t thread, int timeout_ms);
+int sendShutdown(int *sock, pthread_t *thread, int timeout_ms, int cnt);
 
 int handlePrePrepare(worker_pre_prepare_t *ppMsg,
                      size_t dataSize,
@@ -125,17 +126,9 @@ int Node::startup() {
     timeout.tv_usec = (DEFAULT_TIMEOUT_MS % 1000) * 1000;
     rv = setsockopt(this->clientSock, SOL_SOCKET, SO_RCVTIMEO,
                     (void*) &timeout, sizeof(timeout));
-    if (rv < 0){
+    if (rv < 0) {
         perror("Failed to set timeout on client sock.");
     }
-
-    /* Spawn thread for Node::manager() */
-    /* NOTE: This is done last to ensure all worker sockets have been created */
-    pthread_barrier_t managerBarrier;
-    rv = pthread_barrier_init(&managerBarrier, nullptr, 2);
-    managerArg.barrier = &managerBarrier;
-    pthread_create(&managerThread, nullptr, manager, (void *) &managerArg);
-    pthread_barrier_wait(&managerBarrier);
 
     /* Spawn worker thread pool */
     pthread_barrier_t workerBarrier;
@@ -150,6 +143,14 @@ int Node::startup() {
     }
     pthread_barrier_wait(&workerBarrier);
 
+    /* Spawn thread for Node::manager() */
+    /* NOTE: This is done last to ensure all worker sockets have been created */
+    pthread_barrier_t managerBarrier;
+    rv = pthread_barrier_init(&managerBarrier, nullptr, 2);
+    managerArg.barrier = &managerBarrier;
+    pthread_create(&managerThread, nullptr, manager, (void *) &managerArg);
+    pthread_barrier_wait(&managerBarrier);
+
     pthread_barrier_destroy(&workerBarrier);
     pthread_barrier_destroy(&managerBarrier);
     logMsg("Node startup complete.");
@@ -162,7 +163,7 @@ int Node::shutdown()
 
     /* FIXME: Manager may need longer timeout to shutdown all workers */
     int rv, retVal = 0;
-    rv = sendShutdown(this->clientSock, managerThread, DEFAULT_TIMEOUT_MS);
+    rv = sendShutdown(&(this->clientSock), &managerThread, DEFAULT_TIMEOUT_MS, 1);
 
     if (rv != 0){
         perror("Node failed to shutdown threads cleanly");
@@ -461,17 +462,21 @@ void* Node::manager(void *arg)
             logMsg("Manager got message from client cmd socket.");
 
             msg_header_t* msgHeader = static_cast<msg_header_t*>(buf);
+            worker_new_job_msg_t newJob;
             switch (msgHeader->msgType){
                 case MSG_TYPE_THREAD_SHUTDOWN:
                     /* TODO: More cleanup? */
                     running = false;
 
-                    /* Distribute shutdown message to workers */
-                    for(i = WORKER_0; i < INIT_WORKER_THREAD_CNT + WORKER_0; i++) {
-                        /* FIXME: If worker is in the middle of a PBFT exchange,
-                         * it likely won't process shutdown message before timeout occurs */
-                        sendShutdown(pollItems[i].fd, workerThread[i], DEFAULT_TIMEOUT_MS);
+                    /* Workers always expect new job message first. Send this before sending shutdown */
+                    memset(&newJob, 0, sizeof(newJob));
+                    for (i = WORKER_0; i < INIT_WORKER_THREAD_CNT + WORKER_0; i++) {
+                        send(pollItems[i].fd, &newJob, sizeof(newJob), 0);
                     }
+
+                    /* FIXME: If worker is in the middle of a PBFT exchange,
+                     * it likely won't process shutdown message before timeout occurs */
+                    sendShutdown(workerSock, workerThread, DEFAULT_TIMEOUT_MS, INIT_WORKER_THREAD_CNT);
                     break;
 
                 case MSG_TYPE_PUT_DATA_REQ:
@@ -495,13 +500,9 @@ void* Node::manager(void *arg)
                     clientWorkers.push_back(tempWorker);
 
                     /* Send start of new job message to appropriate worker */
-                    worker_new_job_msg_t newJob;
                     memset(&newJob, 0, sizeof(newJob));
                     ssize_t bytesSent;
                     bytesSent = send(tempWorker.sock, &newJob, sizeof(newJob), 0);
-                    if(bytesSent){
-                        bytesSent = 1;
-                    }
 
                     /* Send actual message */
                     send(tempWorker.sock, buf, (size_t) bytesRead, 0);
@@ -1115,8 +1116,8 @@ void* Node::workerMain(void* arg)
     /* TODO: Other cleanup? */
     free(buf);
     for (i = 0; i < DHT_REPLICATION; i++){
-        free(commitValues->data_ptr);
-        free(prepareValues->data_ptr);
+        free(commitValues[i].data_ptr);
+        free(prepareValues[i].data_ptr);
     }
     close(managerSock);
     pthread_exit(0);
@@ -1207,12 +1208,10 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     getMsg.msgType = MSG_TYPE_GET_DATA_REQ;
     getMsg.digest = digest;
 
-    /* FIXME: Do we need to wait and compare results here, or has that been done already? */
     /* Send GET_REQ message to node manager thread */
     send(this->clientSock, &getMsg, sizeof(getMsg), 0);
 
     /* Receive response */
-    /* FIXME: Mem leak occurs if this function does not return successfully. */
     worker_get_rep_msg_t *getRep;
     getRep = static_cast<worker_get_rep_msg_t*>(malloc(MAX_MSG_SIZE));
     if (getRep == nullptr){
@@ -1226,37 +1225,42 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
         if (errno == EAGAIN || errno == EWOULDBLOCK){
             /* Timeout occured */
             logMsg("Client request timed out.");
+            free(getRep);
             return -1;
         }
         else{
             perror("Client failed to receive reply.");
+            free(getRep);
             return -1;
         }
     }
     if(bytesRead == 0){
         perror("Client to manager socket is disconnected.");
+        free(getRep);
         return -1;
     }
     if (bytesRead < sizeof(worker_get_rep_msg_t)){
         perror("Client received unexpected message size instead of get reply.");
+        free(getRep);
         return -1;
     }
-    /* FIXME: I'm sure some more checks are needed here */
+    /* TODO: I'm sure some more checks are needed here */
     /* FIXME: Flush buffer if reply message larger than expected? */
 
-    /* Check validity */
+    /* Check validity and copy answer to returnable data block */
     value_t response;
     if (getRep->digest == digest) {
         response.value_size = bytesRead - sizeof(worker_get_rep_msg_t);
         if(response.value_size <= 0){
             perror("Received get reply with invalid data size.");
+            free(getRep);
             return -1;
         }
 
         response.value_ptr = malloc(response.value_size);
         if(response.value_ptr == nullptr){
             std::cout << "ERROR: Node::get failed to allocate memory for responses." << std::endl;
-            free(response.value_ptr);
+            free(getRep);
             return -1;
         }
         memcpy(response.value_ptr, getRep->data, response.value_size);
@@ -1264,22 +1268,14 @@ int Node::get(std::string key_str, void** data_ptr, int* data_bytes)
     else{
         /* FIXME: How to best handle this? */
         std::cout << "ERROR: Node::get received response with incorrect hash key." << std::endl;
+        free(getRep);
         return -1;
     }
-
-    /* Copy data to memory block and return */
-    /* FIXME: Why is another memory block allocated? Can't we just return response.value_ptr? */
-    *(data_ptr) = malloc(response.value_size);
-    if (*(data_ptr) == nullptr) {
-        std::cout << "ERROR: Node::get failed to allocate memory for data." << std::endl;
-        free(response.value_ptr);
-        return -1;
-    }
-    memcpy(*(data_ptr), response.value_ptr, response.value_size);
-    *(data_bytes) = response.value_size;
-
-    free(response.value_ptr);
     free(getRep);
+
+    /* Copy data ptr and size to input args */
+    *(data_ptr) = response.value_ptr;
+    *(data_bytes) = response.value_size;
 
     return 0;
 }
@@ -1560,7 +1556,6 @@ int handlePrePrepare(worker_pre_prepare_t *ppMsg,
     prepareValues[prepareIndex].digest = pMsg->digest;
     prepareValues[prepareIndex].data_size = dataSize;
     memcpy(prepareValues[prepareIndex].data_ptr, pMsg->data, dataSize);
-    prepareIndex++;
     free(pMsg);
 
     return 0;
@@ -1613,40 +1608,63 @@ int findWorkerWithSock(std::vector<worker_t>::iterator* in_worker, std::vector<w
     return -1;
 }
 
-int sendShutdown(int sock, pthread_t thread, int timeout_ms)
+int sendShutdown(int *sock, pthread_t *thread, int timeout_ms, int cnt)
 {
-    /* FIXME: Something in this function makes valgrind panic claiming SIGSEGV */
-    /* Distribute shutdown message to workers */
-    msg_header_t tempHeader;
-    tempHeader.msgType = MSG_TYPE_THREAD_SHUTDOWN;
-    ssize_t bytesSent;
-    void *retVal;
-    int rv;
-
-    timespec timeout;
-    timeout.tv_sec = (timeout_ms / 1000);
-    timeout.tv_nsec = (timeout_ms % 1000) * 1000;
-
-    bytesSent = send(sock, &tempHeader, sizeof(tempHeader), 0);
-
-    if (bytesSent != sizeof(msg_header_t)) {
-        /* Message send failed. Send cancel request. */
-        perror("Failed sending shutdown message to thread. Sending cancel");
-        pthread_cancel(thread);
-    }
-
-    rv = pthread_timedjoin_np(thread, &retVal, &timeout);
-    if (rv != 0) {
-        if (errno == ETIMEDOUT){
-            perror("Thread did not shutdown in time. Sending cancel");
-            pthread_cancel(thread);
+    int i, rv;
+    for (i = 0; i < cnt; i++){
+        if (sock[i] <= 0) {
+            logMsg("sendShutdown() received invalid socket argument.");
             return -1;
-        } else {
-            perror("Thread did not shutdown properly.");
+        }
+        /* No straightforward way to check if pthread_t is valid because that would make too much sense */
+        rv = pthread_kill(thread[i], 0);
+        if (rv == ESRCH) {
+            logMsg("sendShutdown() received invalid pthread_t thread identifier.");
             return -1;
         }
     }
 
+    /* Prepare shutdown message */
+    msg_header_t tempHeader;
+    tempHeader.msgType = MSG_TYPE_THREAD_SHUTDOWN;
+    ssize_t bytesSent;
+    void *retVal;
+
+    /* Configure timeout struct */
+    timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += (timeout_ms / 1000);
+    timeout.tv_nsec += (timeout_ms % 1000) * 1000000;
+    /* Make sure nano-second value is not > 1 second */
+    if (timeout.tv_nsec > 1000000000){
+        timeout.tv_nsec -= 1000000000;
+        timeout.tv_sec += 1;
+    }
+
+    /* Send message to specified sockets */
+    for (i = 0; i < cnt; i++) {
+        bytesSent = send(sock[i], &tempHeader, sizeof(tempHeader), 0);
+        if (bytesSent != sizeof(msg_header_t)) {
+            /* Message send failed. Send cancel request. */
+            perror("Failed sending shutdown message to thread. Sending cancel");
+            pthread_cancel(thread[i]);
+        }
+    }
+
+    /* Try to join threads */
+    for (i = 0; i < cnt; i++) {
+        rv = pthread_timedjoin_np(thread[i], &retVal, &timeout);
+        if (rv != 0) {
+            if (rv == ETIMEDOUT) {
+                perror("Thread did not shutdown in time. Sending cancel");
+                pthread_cancel(thread[i]);
+            } else {
+                perror("Thread did not shutdown properly.");
+            }
+        }
+    }
+
+    /* TODO: Return non-0 if threads didn't shutdown cleanly? */
     return 0;
 }
 
