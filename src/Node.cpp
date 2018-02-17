@@ -830,10 +830,10 @@ void* Node::workerMain(void* arg)
                 }
 
                 /********** DEBUGGING PRINT STATEMENTS ***************/
-//                sockaddr_in *temp = (sockaddr_in*)(&newJobMsg.reqAddr);
-//                char* ip = inet_ntoa(temp->sin_addr);
-//                std::cout << "IP: " <<  ip << ":" << temp->sin_port << " " << temp->sin_family << std::endl;
-//                std::cout << newJobMsg.addrLen << std::endl;
+                sockaddr_in *temp = (sockaddr_in*)(&newJobMsg.reqAddr);
+                char* ip = inet_ntoa(temp->sin_addr);
+                std::cout << "IP: " <<  ip << ":" << temp->sin_port << " " << temp->sin_family << std::endl;
+                std::cout << newJobMsg.addrLen << std::endl;
 
                 sendto(outSock, &reply, sizeof(reply), 0,
                        (sockaddr*)&(newJobMsg.reqAddr), newJobMsg.addrLen);
@@ -950,6 +950,12 @@ void* Node::workerMain(void* arg)
                     peerCnt = 0;
                     prePrepareMsg->digest = putMsg->digest;
                     mempcpy(prePrepareMsg->data, putMsg->data, dataSize);
+
+                    /********** DEBUGGING PRINT STATEMENTS ***************/
+                    sockaddr_in *temp = (sockaddr_in*)(&outAddr[i]);
+                    char* ip = inet_ntoa(temp->sin_addr);
+                    std::cout << "IP: " <<  ip << ":" << temp->sin_port << " " << temp->sin_family << std::endl;
+                    std::cout << outAddrLen << std::endl;
 
                     bytesSent = sendto(outSock, prePrepareMsg, ppSize, 0,
                                        (sockaddr*) &(outAddr[i]), outAddrLen);
