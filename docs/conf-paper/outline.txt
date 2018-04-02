@@ -1,0 +1,15 @@
+Introduction
+Motivation
+    Highly-available / safety-critical systems can benefit from distribution
+        exp. RIAPS uses DHTs for service registration
+    Malicious actors could mess with current systems TODO: check popular current systems
+    Handling malicious actors in distributed systems is currently done with blockchain - TODO: check literature
+        blockchain isn't great for all applications
+            complete ledger is wasteful
+            complete transaction isn't atomic
+    Merging PBFT and DHTs can provide best of both worlds
+About BFDHT
+    Basic stuff, replication, Kademlia
+    Transaction scheme
+Performance
+Conclusion
