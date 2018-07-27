@@ -38,6 +38,7 @@ int main() {
             if (rv == 0) {
                 value = *valPtr;
                 std::cout << "Got: " << value << std::endl;
+                free(valPtr);
             }
             else{
                 std::cout << "Node get failed." << std::endl;
@@ -66,6 +67,8 @@ int main() {
             break;
         }
     }
+
+    delete node;
 
 
     /********** Debugging code for testing local hash table functionality **********/

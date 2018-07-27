@@ -107,15 +107,17 @@ int Chord::getNodeIP()
             if (strstr(ifa->ifa_name,target_interface) != nullptr) {
 //                memcpy(this->myIp.ip,addressBuffer,INET_ADDRSTRLEN);
 //                printf("%s IP Address %s\n", ifa->ifa_name, addressBuffer);
-                this->myId.ip = addressBuffer;
+                this->myId.ip.copy(addressBuffer, INET_ADDRSTRLEN, 0);
                 success = 1;
                 break;
             }
         }
     }
-    if (ifAddrStruct!=NULL) freeifaddrs(ifAddrStruct);
+    if (ifAddrStruct != NULL) {
+        freeifaddrs(ifAddrStruct);
+    }
 
-        std::cout << "Using IP address " << this->myId.ip << std::endl;
+    std::cout << "Using IP address " << this->myId.ip << std::endl;
 
     return success;
 }

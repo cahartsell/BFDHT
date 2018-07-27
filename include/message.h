@@ -7,7 +7,6 @@
 
 #include <cstdint>
 #include <string>
-#include <zmq.hpp>
 
 #include "types.h"
 
@@ -26,7 +25,14 @@
 #define MSG_TYPE_GET_DATA_FWD       0x09
 #define MSG_TYPE_COMMIT             0x0A
 
+typedef struct worker_new_job_msg_t{
+    worker_new_job_msg_t() : addrLen(0) {}
+    sockaddr_storage reqAddr;
+    socklen_t addrLen;
+} worker_new_job_msg_t;
+
 typedef struct msg_header_t{
+    msg_header_t() : msgType(0) {}
     uint16_t msgType;
     char data[];
 } msg_header_t;

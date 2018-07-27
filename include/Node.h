@@ -79,11 +79,6 @@ typedef struct worker_t{
     digest_t currentKey;
 } worker_t;
 
-typedef struct worker_new_job_msg_t{
-    sockaddr_storage reqAddr;
-    socklen_t addrLen;
-} worker_new_job_msg_t;
-
 class Node
 {
 public:
