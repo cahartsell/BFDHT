@@ -12,6 +12,7 @@
 #include <sys/un.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdexcept>
 
 #include "Node.h"
 
@@ -67,6 +68,9 @@ Node::Node()
     this->myTopic[0] = (char)atoi(token);
     for (int i = 1;i < MSG_TOPIC_SIZE; i++) {
         token = std::strtok(nullptr,".");
+        if (token == NULL){
+            throw std::runtime_error("Node failed to parse IP address");
+        }
         this->myTopic[i] = (char)atoi(token);
     }
 
